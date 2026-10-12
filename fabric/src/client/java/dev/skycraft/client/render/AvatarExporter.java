@@ -56,6 +56,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.ExperienceOrb;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.projectile.ItemSupplier;
 import net.minecraft.world.entity.projectile.arrow.AbstractArrow;
@@ -74,20 +75,25 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>Two captures a frame: the player's body in third person (F5), relative to the feet Skyrim's
  * camera follows so it can't drift from the camera; and everything else (lit TNT, falling
- * blocks, minecarts, boats, ..., block entities (chests, beds, signs, banners, pistons while they
- * move, ...) and all particles) relative to a block near the camera. Arrows,
- * dropped items and thrown items have their own lighter path (WorldExporter). Render thread only.
+ * blocks, minecarts, boats, ..., experience orbs, dropped and thrown items near the camera, block
+ * entities (chests, beds, signs, banners, pistons while they move, ...) and all particles)
+ * relative to a block near the camera. Arrows, and items further away, have their own lighter
+ * path (WorldExporter). Render thread only.
  */
 final class AvatarExporter implements SubmitNodeCollector {
-	// Vertex flags: cutout, full-detail texture, lit by its own faces / without a normal / blended.
+	// Vertex flags: cutout, full-detail texture, lit by its own faces / without a normal / blended;
+	// GLOW: cutout and unlit, at full brightness (experience orbs; bit 7, see RenVertex).
 	private static final int SOLID = 1 | 8 | (7 << 4);
 	private static final int PARTICLE = 1 | 8;
 	private static final int PARTICLE_BLENDED = 2 | 8;
+	private static final int GLOW = 1 | 8 | 128;
+	private static final Identifier EXPERIENCE_ORB = Identifier.withDefaultNamespace("textures/entity/experience/experience_orb.png");
 	// How a batch's raw UVs map into the combined atlas (texture 0).
 	private static final int UV_RAW = 0, UV_BLOCK_ATLAS = 1, UV_ITEM_ATLAS = 2;
 	private static final Direction[] FACES_AND_NONE = { null, Direction.DOWN, Direction.UP, Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST };
 	private static final double SCENE_RANGE = 64.0;
 	private static final int SCENE_MAX_ENTITIES = 48;
+	private static final int SCENE_MAX_ORBS = 64; // one quad each; kept apart so a shower of them can't crowd out mobs
 	private static final double BLOCK_ENTITY_RANGE = 48.0;
 	private static final int SCENE_MAX_BLOCK_ENTITIES = 256;
 	private static boolean warnedBlockEntity;
@@ -292,24 +298,45 @@ final class AvatarExporter implements SubmitNodeCollector {
 		dispatcher.prepare(camera, minecraft.crosshairPickEntity);
 		CameraRenderState cameraState = minecraft.gameRenderer.gameRenderState().levelRenderState.cameraRenderState;
 		PoseStack pose = new PoseStack();
-		int entities = 0;
+		int entities = 0, orbs = 0;
 		for (Entity e : level.entitiesForRendering()) {
-			if (e == player || e instanceof ItemEntity || e instanceof AbstractArrow || e instanceof ItemSupplier || e instanceof SkyrimActorEntity
-				|| e.distanceToSqr(cam) > SCENE_RANGE * SCENE_RANGE || entities >= SCENE_MAX_ENTITIES) {
+			if (e == player || e instanceof AbstractArrow || e instanceof SkyrimActorEntity || e.distanceToSqr(cam) > SCENE_RANGE * SCENE_RANGE) {
 				continue;
 			}
-			entities++;
+			if (e instanceof ItemEntity || e instanceof ItemSupplier) {
+				// Minecraft's own item model for the ones WorldExporter picked (it draws the rest).
+				if (!WorldExporter.modelled(e)) {
+					continue;
+				}
+			} else if (e instanceof ExperienceOrb) {
+				if (orbs >= SCENE_MAX_ORBS) {
+					continue;
+				}
+				orbs++;
+			} else {
+				if (entities >= SCENE_MAX_ENTITIES) {
+					continue;
+				}
+				entities++;
+			}
 			try {
 				EntityRenderState state = dispatcher.extractEntity(e, partialTick);
 				dispatcher.submit(state, cameraState, state.x - origin[0], state.y - origin[1], state.z - origin[2], pose, this);
+				this.commit();
 			} catch (RuntimeException ex) {
+				// Nothing of it, rather than half of it; and a pose stack its renderer left pushed goes.
+				this.rollback();
+				pose = new PoseStack();
+				if (e instanceof ItemEntity || e instanceof ItemSupplier) {
+					WorldExporter.stopModellingItems(); // its flat sprite from WorldExporter instead, from now on
+				}
 				if (!warnedEntity) {
 					warnedEntity = true;
 					SkyCraft.LOG.warn("SkyCraft: couldn't capture {} for Skyrim", e, ex);
 				}
 			}
 		}
-		submitBlockEntities(minecraft, level, cam, origin, partialTick, cameraState, pose);
+		submitBlockEntities(minecraft, level, cam, origin, partialTick, cameraState);
 		// Particles were extracted this frame relative to Minecraft's camera.
 		this.capture.flush();
 		this.offX = (float) (cam.x - origin[0]);
@@ -319,7 +346,9 @@ final class AvatarExporter implements SubmitNodeCollector {
 			for (var group : minecraft.gameRenderer.gameRenderState().levelRenderState.particlesRenderState.particles) {
 				group.submit(this, cameraState);
 			}
+			this.commit();
 		} catch (RuntimeException ex) {
+			this.rollback();
 			SkyCraft.LOG.warn("SkyCraft: couldn't capture particles for Skyrim", ex);
 		}
 		this.capture.flush();
@@ -335,7 +364,8 @@ final class AvatarExporter implements SubmitNodeCollector {
 	 * here, so they're taken straight from the loaded chunks around the camera.
 	 */
 	private void submitBlockEntities(Minecraft minecraft, net.minecraft.client.multiplayer.ClientLevel level, Vec3 cam, double[] origin, float partialTick,
-		CameraRenderState cameraState, PoseStack pose) {
+		CameraRenderState cameraState) {
+		PoseStack pose = new PoseStack();
 		var dispatcher = minecraft.getBlockEntityRenderDispatcher();
 		dispatcher.prepare(cam);
 		double range2 = BLOCK_ENTITY_RANGE * BLOCK_ENTITY_RANGE;
@@ -367,7 +397,10 @@ final class AvatarExporter implements SubmitNodeCollector {
 						pose.translate(pos.getX() - origin[0], pos.getY() - origin[1], pos.getZ() - origin[2]);
 						dispatcher.submit(state, pose, this, cameraState);
 						pose.popPose();
+						this.commit();
 					} catch (RuntimeException ex) {
+						this.rollback();
+						pose = new PoseStack();
 						if (!warnedBlockEntity) {
 							warnedBlockEntity = true;
 							SkyCraft.LOG.warn("SkyCraft: couldn't capture {} at {} for Skyrim", blockEntity.getType(), pos, ex);
@@ -379,8 +412,28 @@ final class AvatarExporter implements SubmitNodeCollector {
 	}
 
 	private void begin() {
+		this.capture.drop();
 		for (Batch b : this.batches.values()) {
 			b.clear();
+		}
+	}
+
+	/** What the batches hold now is whole: the last thing was captured from start to end. */
+	private void commit() {
+		this.capture.flush();
+		for (Batch b : this.batches.values()) {
+			b.committed = b.count;
+		}
+	}
+
+	/**
+	 * Takes back what a capture that failed part way left in the batches: a quad written only in
+	 * part would shift every quad after it into a stray triangle across the scene.
+	 */
+	private void rollback() {
+		this.capture.drop();
+		for (Batch b : this.batches.values()) {
+			b.count = b.committed;
 		}
 	}
 
@@ -401,7 +454,8 @@ final class AvatarExporter implements SubmitNodeCollector {
 		}
 		ByteBuffer header = ByteBuffer.allocate((origin != null ? 24 : 0) + 8 + used.size() * 16).order(ByteOrder.LITTLE_ENDIAN);
 		if (origin != null) {
-			header.putDouble(origin[0]).putDouble(origin[1]).putDouble(origin[2]);
+			// In the terms of the Skyrim world whose space the camera is in (SkySpace).
+			header.putDouble(dev.skycraft.link.SkySpace.local(origin[0])).putDouble(origin[1]).putDouble(dev.skycraft.link.SkySpace.local(origin[2]));
 		}
 		header.putInt(used.size()).putInt(vertices);
 		ByteBuffer body = ByteBuffer.allocateDirect(vertices * Proto.REN_VERTEX_BYTES).order(ByteOrder.LITTLE_ENDIAN);
@@ -446,6 +500,7 @@ final class AvatarExporter implements SubmitNodeCollector {
 		final boolean translucent;
 		int[] data = new int[8 * 256];
 		int count;
+		int committed; // vertices of everything captured whole (see rollback)
 
 		Batch(int texture, int uvMode, int flags) {
 			this.texture = texture;
@@ -456,6 +511,7 @@ final class AvatarExporter implements SubmitNodeCollector {
 
 		void clear() {
 			this.count = 0;
+			this.committed = 0;
 		}
 
 		void add(float x, float y, float z, float u, float v, int argb, int light, int overlay) {
@@ -526,6 +582,11 @@ final class AvatarExporter implements SubmitNodeCollector {
 			this.pending = false;
 		}
 
+		/** Forgets the vertex being written (its capture failed). */
+		void drop() {
+			this.pending = false;
+		}
+
 		@Override
 		public VertexConsumer addVertex(float x, float y, float z) {
 			this.flush();
@@ -588,18 +649,23 @@ final class AvatarExporter implements SubmitNodeCollector {
 
 	// ---- textures --------------------------------------------------------------------------------
 
-	/** The batch for a render type's texture, sending the texture to Skyrim the first time. Null: can't show it. */
-	private @Nullable Batch batchFor(RenderType renderType) {
+	/** The texture a render type draws with (its Sampler0), or null for glints, outlines, shadows and untextured ones. */
+	private static @Nullable Identifier textureOf(RenderType renderType) {
 		RenderTypeAccessor type = (RenderTypeAccessor) renderType;
 		String name = type.skycraft$name();
 		if (name.contains("glint") || name.contains("outline") || name.contains("shadow")) {
 			return null;
 		}
 		Object binding = ((RenderSetupAccessor) (Object) type.skycraft$state()).skycraft$textures().get("Sampler0");
-		if (binding == null) {
+		return binding == null ? null : ((TextureBindingAccessor) binding).skycraft$location();
+	}
+
+	/** The batch for a render type's texture, sending the texture to Skyrim the first time. Null: can't show it. */
+	private @Nullable Batch batchFor(RenderType renderType) {
+		Identifier texture = textureOf(renderType);
+		if (texture == null) {
 			return null;
 		}
-		Identifier texture = ((TextureBindingAccessor) binding).skycraft$location();
 		if (texture.equals(TextureAtlas.LOCATION_BLOCKS)) {
 			return this.batch(0, UV_BLOCK_ATLAS, SOLID);
 		}
@@ -861,8 +927,28 @@ final class AvatarExporter implements SubmitNodeCollector {
 	public void submitShapeOutline(PoseStack poseStack, VoxelShape shape, RenderType renderType, int color, float width, boolean afterTerrain) {
 	}
 
+	/**
+	 * Experience orbs: Minecraft draws each as a small quad facing its camera, on its orb sheet,
+	 * coloured green to yellow as it pulses. Kept here as they are, and drawn glowing (unlit).
+	 * Other custom geometry (beacon beams, lightning, fishing lines, debug shapes) isn't built
+	 * from textured quads the way the batches here expect, so it stays out.
+	 */
 	@Override
 	public void submitCustomGeometry(PoseStack poseStack, RenderType renderType, SubmitNodeCollector.CustomGeometryRenderer customGeometryRenderer) {
+		if (!EXPERIENCE_ORB.equals(textureOf(renderType))) {
+			return;
+		}
+		int id = textureId(EXPERIENCE_ORB);
+		if (id < 0) {
+			return;
+		}
+		Batch batch = this.batch(id, UV_RAW, GLOW);
+		int before = batch.count;
+		this.capture.begin(batch);
+		customGeometryRenderer.render(poseStack.last(), this.capture);
+		this.capture.flush();
+		// Whole quads only: anything else would shift every quad after it.
+		batch.count = before + (batch.count - before) / 4 * 4;
 	}
 
 	@Override

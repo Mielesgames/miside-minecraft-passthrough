@@ -74,7 +74,10 @@ public final class SkyDigBlast {
 							break;
 						}
 						if (r > SkyDig.AIR && result == 0) {
-							result = SkyDig.underground(r, Math.max(this.probe.depth, 0.5));
+							// Bedrock under the land holds against any blast (as a bedrock block would).
+							SkyTri s = this.probe.surface;
+							result = s != null && s.terrain && this.probe.depth >= SkyDig.BEDROCK_DEPTH ? dev.skycraft.link.Proto.DIG_BEDROCK
+								: SkyDig.underground(r, Math.max(this.probe.depth, 0.5));
 						}
 					}
 				}
@@ -106,8 +109,8 @@ public final class SkyDigBlast {
 		}
 		for (BlockPos pos : targets) {
 			int m = material(pos);
-			if (m <= 0) {
-				continue;
+			if (m <= 0 || dev.skycraft.breach.SkyBreach.claim(this.level, this.world, pos)) {
+				continue; // nothing there, or a breach antechamber's cell (its walls are real blocks now)
 			}
 			SkyDig.markDug(this.level, this.world, pos);
 			this.level.setBlock(pos, SkyDig.blockFor(this.level, pos, m), 2 | 16);

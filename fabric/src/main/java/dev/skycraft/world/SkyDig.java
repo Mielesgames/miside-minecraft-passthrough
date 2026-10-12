@@ -43,12 +43,16 @@ import org.jspecify.annotations.Nullable;
  * nothing for NPCs to stand on), with the drops of that block. Nothing sticks up out of the
  * ground: the cell is empty.</li>
  * <li><b>reveal</b>: the cells around a mined one that are wholly inside Skyrim's geometry become
- * blocks (dirt under grass, stone with ores, bedrock a few blocks under the land; endless stone
- * inside rocks and cave walls). Cells only partly inside keep Skyrim's surface, and the part
- * under it shows as Minecraft walls, so a hole is always closed.</li>
+ * blocks (dirt under grass, stone with ores, deepslate, then bedrock 64 blocks under the land,
+ * however deep the land is over them and whatever is buried in it; stone inside rocks and cave
+ * walls and out past an interior's rooms; see SkyGround). Cells only partly inside keep Skyrim's
+ * surface, and the part under it shows as Minecraft walls, so a hole is always closed. Until a
+ * cell is revealed, an undug cell next to a dug one is solid anyway where it's under the land
+ * ({@link #wallShape}).</li>
  * </ul>
  * Which cells are dug is kept per chunk (saved with the world, synced to every player) and per
- * Skyrim world (worldspace or interior cell: interiors share coordinates), and sent to Skyrim.
+ * Skyrim world (worldspace or interior cell), and sent to Skyrim. Each Skyrim world has a space of its
+ * own in the mirror (SkySpace), so its dug cells and the blocks they reveal are in its space only.
  * Opening and revealing are decided by the digging player's client, which knows Skyrim's geometry
  * around them; the server just applies it.
  */
@@ -136,6 +140,39 @@ public final class SkyDig {
 			}
 			return new DugColumn(List.copyOf(out));
 		}
+
+		/** This column without one Skyrim world's sections. */
+		public DugColumn without(int world) {
+			List<DugSection> out = new ArrayList<>(this.sections.size());
+			for (DugSection s : this.sections) {
+				if (s.world != world) {
+					out.add(s);
+				}
+			}
+			return out.size() == this.sections.size() ? this : new DugColumn(List.copyOf(out));
+		}
+
+		/** This column with a section's cells added (to its world's section at that height, if any). */
+		public DugColumn merged(DugSection add) {
+			List<DugSection> out = new ArrayList<>(this.sections.size() + 1);
+			boolean found = false;
+			for (DugSection s : this.sections) {
+				if (s.world == add.world && s.sectionY == add.sectionY && s.bits.length == 64 && add.bits.length == 64) {
+					long[] bits = s.bits.clone();
+					for (int k = 0; k < 64; k++) {
+						bits[k] |= add.bits[k];
+					}
+					out.add(new DugSection(s.world, s.sectionY, bits));
+					found = true;
+				} else {
+					out.add(s);
+				}
+			}
+			if (!found) {
+				out.add(add);
+			}
+			return new DugColumn(List.copyOf(out));
+		}
 	}
 
 	public static final AttachmentType<DugColumn> DUG = AttachmentRegistry.<DugColumn>builder()
@@ -151,6 +188,11 @@ public final class SkyDig {
 	public static DugColumn column(LevelChunk chunk) {
 		DugColumn column = chunk.getAttached(DUG);
 		return column != null ? column : DugColumn.EMPTY;
+	}
+
+	/** Replaces a chunk's dug cells (none: the attachment goes). Synced and saved like any dig. */
+	public static void setColumn(LevelChunk chunk, DugColumn column) {
+		chunk.setAttached(DUG, column.sections().isEmpty() ? null : column);
 	}
 
 	public static boolean isDug(Level level, int world, BlockPos pos) {
@@ -173,6 +215,9 @@ public final class SkyDig {
 		ServerLevel level = player.level();
 		if (!destruction || !inReach(player, pos, REACH) || !level.isLoaded(pos) || player.isSpectator()) {
 			return;
+		}
+		if (dev.skycraft.breach.SkyBreach.claim(level, world, pos)) {
+			return; // a breach antechamber's cell (built whole the first time it's reached)
 		}
 		LevelChunk chunk = level.getChunkAt(pos);
 		DugColumn column = column(chunk);
@@ -226,8 +271,42 @@ public final class SkyDig {
 		return true;
 	}
 
+	/**
+	 * Marks many cells dug at once, with one change per chunk (so one sync each): a whole breach
+	 * antechamber. Returns the cells that weren't dug before.
+	 */
+	public static List<BlockPos> markDug(ServerLevel level, int world, List<BlockPos> cells) {
+		java.util.Map<Long, List<BlockPos>> byChunk = new java.util.LinkedHashMap<>();
+		for (BlockPos pos : cells) {
+			long key = ((long) (pos.getX() >> 4) << 32) | ((pos.getZ() >> 4) & 0xFFFFFFFFL);
+			byChunk.computeIfAbsent(key, k -> new ArrayList<>()).add(pos);
+		}
+		List<BlockPos> fresh = new ArrayList<>();
+		for (List<BlockPos> list : byChunk.values()) {
+			LevelChunk chunk = level.getChunkAt(list.getFirst());
+			DugColumn before = column(chunk);
+			DugColumn column = before;
+			for (BlockPos pos : list) {
+				if (!column.isDug(world, pos.getX(), pos.getY(), pos.getZ())) {
+					column = column.with(world, pos.getX(), pos.getY(), pos.getZ());
+					fresh.add(pos);
+				}
+			}
+			if (column != before) {
+				chunk.setAttached(DUG, column);
+			}
+		}
+		return fresh;
+	}
+
 	/** A cell wholly inside Skyrim's geometry: dug out of it, and the block it's made of put there. */
 	public static void digCell(ServerLevel level, int world, BlockPos pos, int material) {
+		if (dev.skycraft.breach.SkyBreach.claim(level, world, pos)) {
+			return; // a breach antechamber's cell (built whole the first time it's reached)
+		}
+		if (material > 0 && occupied(level, pos)) {
+			return; // someone is in it, so it's open whatever Skyrim's geometry says: never bury anyone
+		}
 		if (!markDug(level, world, pos)) {
 			return;
 		}
@@ -238,9 +317,20 @@ public final class SkyDig {
 		}
 	}
 
+	/** Whether a player (not a spectator) is in this cell. */
+	private static boolean occupied(ServerLevel level, BlockPos pos) {
+		AABB cell = new AABB(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1);
+		for (ServerPlayer p : level.players()) {
+			if (!p.isSpectator() && p.getBoundingBox().intersects(cell)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	/** The block a Proto.DIG_* material stands for (stone without ores). */
 	public static BlockState materialState(int material) {
-		return switch (material) {
+		return switch (base(material)) {
 			case DIG_GRASS -> Blocks.GRASS_BLOCK.defaultBlockState();
 			case DIG_DIRT -> Blocks.DIRT.defaultBlockState();
 			case DIG_COBBLE -> Blocks.COBBLESTONE.defaultBlockState();
@@ -267,7 +357,11 @@ public final class SkyDig {
 
 	/** The block a Proto.DIG_* material becomes here. Stone has ores in it. */
 	public static BlockState blockFor(ServerLevel level, BlockPos pos, int material) {
-		return material == DIG_STONE || material == DIG_NONE ? stoneOrOre(level.getSeed(), pos) : materialState(material);
+		int depthPlusOne = material >>> DEPTH_SHIFT & 0xFF;
+		if (base(material) == DIG_STONE || base(material) == DIG_NONE) {
+			return depthPlusOne > 0 ? oreByDepth(level.getSeed(), pos, depthPlusOne - 1) : stoneOrOre(level.getSeed(), pos);
+		}
+		return materialState(material);
 	}
 
 	/** Ores come in little clusters (a 2x2x2 cell picks one ore, then each block in it maybe). */
@@ -306,305 +400,104 @@ public final class SkyDig {
 		return Blocks.STONE.defaultBlockState();
 	}
 
+	/**
+	 * Stone or ore at a known depth under the land, roughly like Minecraft's own layers: coal and
+	 * copper near the top, iron throughout, gold, redstone and lapis lower, diamonds deep, and
+	 * deepslate (with deepslate ores) from {@link #DEEPSLATE_DEPTH} down to bedrock.
+	 */
+	static BlockState oreByDepth(long seed, BlockPos pos, int depth) {
+		boolean deep = depth >= DEEPSLATE_DEPTH;
+		long cell = mix(seed ^ mix(((long) (pos.getX() >> 1) * 73856093L) ^ ((long) (pos.getY() >> 1) * 19349663L) ^ ((long) (pos.getZ() >> 1) * 83492791L)));
+		long block = mix(cell ^ ((pos.getX() & 1) | (pos.getY() & 1) << 1 | (pos.getZ() & 1) << 2));
+		BlockState plain = deep ? Blocks.DEEPSLATE.defaultBlockState() : Blocks.STONE.defaultBlockState();
+		if ((block & 0xFF) >= 150) { // about 60% of a vein cell's blocks
+			return plain;
+		}
+		int[] chances = oreChances(depth); // per vein cell, in 1/10000: coal, copper, iron, gold, redstone, lapis, diamond, emerald
+		BlockState[] ores = deep
+			? new BlockState[] { Blocks.DEEPSLATE_COAL_ORE.defaultBlockState(), Blocks.DEEPSLATE_COPPER_ORE.defaultBlockState(),
+				Blocks.DEEPSLATE_IRON_ORE.defaultBlockState(), Blocks.DEEPSLATE_GOLD_ORE.defaultBlockState(), Blocks.DEEPSLATE_REDSTONE_ORE.defaultBlockState(),
+				Blocks.DEEPSLATE_LAPIS_ORE.defaultBlockState(), Blocks.DEEPSLATE_DIAMOND_ORE.defaultBlockState(), Blocks.DEEPSLATE_EMERALD_ORE.defaultBlockState() }
+			: new BlockState[] { Blocks.COAL_ORE.defaultBlockState(), Blocks.COPPER_ORE.defaultBlockState(), Blocks.IRON_ORE.defaultBlockState(),
+				Blocks.GOLD_ORE.defaultBlockState(), Blocks.REDSTONE_ORE.defaultBlockState(), Blocks.LAPIS_ORE.defaultBlockState(),
+				Blocks.DIAMOND_ORE.defaultBlockState(), Blocks.EMERALD_ORE.defaultBlockState() };
+		int roll = (int) ((cell >>> 16) % 10000L);
+		for (int i = 0; i < chances.length; i++) {
+			if ((roll -= chances[i]) < 0) {
+				return ores[i];
+			}
+		}
+		return plain;
+	}
+
+	/** Ore chances per vein cell at a depth, in 1/10000: coal, copper, iron, gold, redstone, lapis, diamond, emerald. */
+	static int[] oreChances(int depth) {
+		if (depth < 8) {
+			return new int[] { 450, 250, 200, 0, 0, 0, 0, 0 };
+		}
+		if (depth < 24) {
+			return new int[] { 300, 200, 280, 40, 40, 30, 0, 5 };
+		}
+		if (depth < 40) {
+			return new int[] { 120, 80, 260, 90, 120, 60, 25, 8 };
+		}
+		return new int[] { 40, 20, 200, 110, 200, 70, 70, 5 };
+	}
+
 	private static long mix(long z) {
 		z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;
 		z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;
 		return z ^ (z >>> 31);
 	}
 
-	// ---- client: what's inside Skyrim's geometry ----------------------------------------------
+	// ---- client: what's inside Skyrim's geometry (SkyGround) ------------------------------------
+
+	/** Skyrim's surfaces as SkyGround sees them: SkyCollision's, as they were before anything was dug. */
+	public static final SkyGround.Surfaces SURFACES = (minX, minY, minZ, maxX, maxY, maxZ, out) -> SkyCollision.originalSurfacesNear(
+		new AABB(minX, minY, minZ, maxX, maxY, maxZ), out);
 
 	/** Leave the cell alone: Skyrim geometry that can't be dug (a building) is there. */
-	public static final int KEEP = -1;
+	public static final int KEEP = SkyGround.KEEP;
 	/** Open air, or only partly inside Skyrim's geometry (its surface stays; walls are drawn). */
-	public static final int AIR = 0;
+	public static final int AIR = SkyGround.AIR;
 	/** Blocks this far under the land's surface are bedrock. */
-	public static final double BEDROCK_DEPTH = 5.0;
-	/** A cell becomes a block only when this many of its 27 sample points are inside. */
-	private static final int WHOLE = 25;
+	public static final double BEDROCK_DEPTH = SkyGround.BEDROCK_DEPTH;
+	/** Below this depth, stone is deepslate (with deepslate ores). */
+	public static final double DEEPSLATE_DEPTH = SkyGround.DEEPSLATE_DEPTH;
+	/** See SkyGround.DEPTH_SHIFT: how deep a stone material is, for ores. */
+	public static final int DEPTH_SHIFT = SkyGround.DEPTH_SHIFT;
 
-	private static final double SEARCH = 2.5;
-	private static final double LAND_REACH = 16.0; // how far above a point the land is looked for
-	private static final double[] SAMPLE = { 1.0 / 6.0, 0.5, 5.0 / 6.0 };
+	/** A SkyGround probe on SkyCollision's surfaces. */
+	public static final class Probe extends SkyGround.Probe {
+		public Probe() {
+			super(SURFACES);
+		}
 
-	/** Is a point inside Skyrim's geometry? Its nearest original surface (within SEARCH) decides. */
-	public static final class Probe {
-		/** The land (terrain) around: a height field, so "below it" is "inside". */
-		public final List<SkyTri> land = new ArrayList<>();
-		/** Everything else (rocks, cliffs, cave walls, trees, buildings). */
-		public final List<SkyTri> tris = new ArrayList<>();
-		private final List<SkyTri> gathered = new ArrayList<>();
-		private final double[] q = new double[3];
-		/** After {@link #test}: the surface deciding it (null: none near, deep inside). */
-		public @Nullable SkyTri surface;
-		/** After {@link #test}: how far behind that surface (infinite if none near). */
-		public double depth;
-		private double boxMinX, boxMinY, boxMinZ, boxMaxX, boxMaxY, boxMaxZ;
-		// Far above and below the box (gathered only if a point is far from every surface), and
-		// that by block column.
-		private @Nullable List<SkyTri> column;
-		private final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<List<SkyTri>> columns = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
-		// Per block: the surfaces that could be within SEARCH of a point in it. A blast's probe holds
-		// thousands, nearly all far from any one point; kept in this.tris's order (ties go the same way).
-		private final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<List<SkyTri>> nearCells = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
-
-		/** Gathers the surfaces around a box (MC coords) once, for many tests inside it. */
+		@Override
 		public Probe around(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
-			this.gathered.clear();
-			this.land.clear();
-			this.tris.clear();
-			this.column = null;
-			this.columns.clear();
-			this.nearCells.clear();
-			this.boxMinX = minX;
-			this.boxMinY = minY;
-			this.boxMinZ = minZ;
-			this.boxMaxX = maxX;
-			this.boxMaxY = maxY;
-			this.boxMaxZ = maxZ;
-			// The land well above too: a point deep under it is still under it.
-			SkyCollision.originalSurfacesNear(new AABB(minX - SEARCH, minY - SEARCH, minZ - SEARCH, maxX + SEARCH, maxY + SEARCH + LAND_REACH, maxZ + SEARCH), this.gathered);
-			for (SkyTri t : this.gathered) {
-				if (t.stairHelper) {
-					continue;
-				}
-				if (t.terrain) {
-					this.land.add(t);
-				} else if (t.maxY >= minY - SEARCH && t.minY <= maxY + SEARCH) {
-					this.tris.add(t);
-				}
-			}
+			super.around(minX, minY, minZ, maxX, maxY, maxZ);
 			return this;
 		}
-
-		/** The land's height at (x, z), or NaN where there's none near. */
-		public double landHeight(double x, double z) {
-			double best = Double.NaN;
-			for (SkyTri t : this.land) {
-				double h = t.heightAt(x, z);
-				if (!Double.isNaN(h) && (Double.isNaN(best) || h > best)) {
-					best = h;
-					this.surface = t;
-				}
-			}
-			return best;
-		}
-
-		/** KEEP (inside something that stays), AIR (in front of a surface) or a material (inside). */
-		public int test(double px, double py, double pz) {
-			// Under the land: inside, whatever else is buried nearby (rocks, roots).
-			double ground = landHeight(px, pz);
-			SkyTri landSurface = this.surface;
-			if (!Double.isNaN(ground) && py < ground) {
-				this.surface = landSurface;
-				this.depth = ground - py;
-				return landSurface.material == DIG_NONE ? DIG_STONE : landSurface.material;
-			}
-			// Above the land (or where there's none, as in interiors): inside an object if behind its
-			// nearest surface (surfaces face out of their solid side).
-			SkyTri nearest = null;
-			double best = SEARCH * SEARCH;
-			double bx = 0, by = 0, bz = 0;
-			for (SkyTri t : nearCell(px, py, pz)) {
-				// Its box already farther than the best so far: it can't be nearer.
-				double ex = Math.max(0.0, Math.max(t.minX - px, px - t.maxX));
-				double ey = Math.max(0.0, Math.max(t.minY - py, py - t.maxY));
-				double ez = Math.max(0.0, Math.max(t.minZ - pz, pz - t.maxZ));
-				if (ex * ex + ey * ey + ez * ez >= best) {
-					continue;
-				}
-				closestPoint(t, px, py, pz, this.q);
-				double dx = px - this.q[0], dy = py - this.q[1], dz = pz - this.q[2];
-				double d2 = dx * dx + dy * dy + dz * dz;
-				if (d2 < best) {
-					best = d2;
-					nearest = t;
-					bx = this.q[0];
-					by = this.q[1];
-					bz = this.q[2];
-				}
-			}
-			this.surface = nearest;
-			if (nearest == null) {
-				this.depth = Double.POSITIVE_INFINITY;
-				return farFromSurfaces(px, py, pz, ground);
-			}
-			if ((px - bx) * nearest.nx + (py - by) * nearest.ny + (pz - bz) * nearest.nz >= 0.0) {
-				return AIR;
-			}
-			if (!nearest.diggable) {
-				return KEEP;
-			}
-			this.depth = Math.sqrt(best);
-			return nearest.material == DIG_NONE ? DIG_STONE : nearest.material;
-		}
-
-		/**
-		 * A point with no surface near (open sky, the middle of a big room, deep in rock): straight
-		 * up decides. Under the top of something (a surface facing up, away from it) it's inside
-		 * that; under an underside (an overhang, a ceiling) or nothing at all it's in the open, as
-		 * long as there's land under it. No land anywhere (interiors): deep in the rock.
-		 */
-		private int farFromSurfaces(double px, double py, double pz, double ground) {
-			boolean landBelow = !Double.isNaN(ground);
-			SkyTri above = null;
-			double aboveY = Double.POSITIVE_INFINITY;
-			for (SkyTri t : columnAt(px, pz)) {
-				double h = t.heightAt(px, pz);
-				if (Double.isNaN(h)) {
-					continue;
-				}
-				if (h > py) {
-					if (h < aboveY) {
-						aboveY = h;
-						above = t;
-					}
-				} else if (t.terrain) {
-					landBelow = true;
-				}
-			}
-			if (above != null && above.ny > 0.0) {
-				this.surface = above;
-				this.depth = aboveY - py;
-				if (!above.diggable) {
-					return KEEP;
-				}
-				return above.material == DIG_NONE ? DIG_STONE : above.material;
-			}
-			return above != null || landBelow ? AIR : DIG_STONE;
-		}
-
-		private List<SkyTri> nearCell(double px, double py, double pz) {
-			int cx = (int) Math.floor(px), cy = (int) Math.floor(py), cz = (int) Math.floor(pz);
-			long key = net.minecraft.core.BlockPos.asLong(cx, cy, cz);
-			List<SkyTri> list = this.nearCells.get(key);
-			if (list == null) {
-				list = new ArrayList<>();
-				for (SkyTri t : this.tris) {
-					if (t.maxX >= cx - SEARCH && t.minX <= cx + 1 + SEARCH && t.maxY >= cy - SEARCH && t.minY <= cy + 1 + SEARCH && t.maxZ >= cz - SEARCH
-						&& t.minZ <= cz + 1 + SEARCH) {
-						list.add(t);
-					}
-				}
-				this.nearCells.put(key, list);
-			}
-			return list;
-		}
-
-		/** The surfaces over or under the block column holding (x, z). */
-		private List<SkyTri> columnAt(double x, double z) {
-			if (this.column == null) {
-				List<SkyTri> all = new ArrayList<>();
-				SkyCollision.originalSurfacesNear(new AABB(Math.min(x, this.boxMinX), this.boxMinY - COLUMN_REACH, Math.min(z, this.boxMinZ),
-					Math.max(x, this.boxMaxX), this.boxMaxY + COLUMN_REACH, Math.max(z, this.boxMaxZ)), all);
-				this.column = new ArrayList<>();
-				for (SkyTri t : all) {
-					if (!t.stairHelper && Math.abs(t.ny) >= 0.05) {
-						this.column.add(t);
-					}
-				}
-			}
-			int bx = (int) Math.floor(x), bz = (int) Math.floor(z);
-			long key = ((long) bx << 32) | (bz & 0xFFFFFFFFL);
-			List<SkyTri> list = this.columns.get(key);
-			if (list == null) {
-				list = new ArrayList<>();
-				for (SkyTri t : this.column) {
-					if (t.maxX >= bx && t.minX <= bx + 1 && t.maxZ >= bz && t.minZ <= bz + 1) {
-						list.add(t);
-					}
-				}
-				this.columns.put(key, list);
-			}
-			return list;
-		}
 	}
 
-	private static final double COLUMN_REACH = 96.0; // how far up and down a lone point looks
-
-	/**
-	 * Is this cell wholly inside Skyrim's geometry, and if so what block is it (a Proto.DIG_*
-	 * material)? Cells only partly inside stay Skyrim's (AIR): its surface stays, and the part
-	 * under it shows as Minecraft walls wherever it's been dug next to (see the client's DigWalls).
-	 * Only for cells next to a dug one: far from every surface means deep inside there.
-	 */
+	/** See SkyGround.classify: the block a cell next to a dug one becomes, AIR or KEEP. */
 	public static int classify(int x, int y, int z) {
-		Probe probe = new Probe().around(x, y, z, x + 1, y + 1, z + 1);
-		int inside = 0;
-		int centreMaterial = DIG_STONE;
-		double centreDepth = Double.POSITIVE_INFINITY;
-		for (double sy : SAMPLE) {
-			for (double sz : SAMPLE) {
-				for (double sx : SAMPLE) {
-					int r = probe.test(x + sx, y + sy, z + sz);
-					if (r == KEEP) {
-						return KEEP;
-					}
-					if (r == AIR) {
-						continue;
-					}
-					inside++;
-					if (sx == 0.5 && sy == 0.5 && sz == 0.5) {
-						centreMaterial = r;
-						centreDepth = probe.depth;
-					}
-				}
-			}
-		}
-		if (inside < WHOLE) {
-			return AIR;
-		}
-		// Under the land: dirt, stone, then bedrock a few blocks down.
-		SkyTri land = landAbove(x + 0.5, y + 0.5, z + 0.5);
-		if (land != null) {
-			double depth = land.heightAt(x + 0.5, z + 0.5) - (y + 0.5);
-			if (depth >= BEDROCK_DEPTH) {
-				return DIG_BEDROCK;
-			}
-			if (Double.isInfinite(centreDepth)) {
-				centreMaterial = land.material == DIG_NONE ? DIG_STONE : land.material;
-				centreDepth = depth;
-			}
-		}
-		return underground(centreMaterial, centreDepth);
+		return SkyGround.classify(SURFACES, x, y, z);
 	}
 
-	/** The nearest stretch of land (Skyrim's terrain) above a point, within 32 blocks, or null. */
+	/** The Proto.DIG_* material without the depth classify() may add. */
+	public static int base(int material) {
+		return SkyGround.base(material);
+	}
+
+	/** The nearest stretch of land (Skyrim's terrain) above a point, within SkyGround.DEEP_REACH, or null. */
 	public static @Nullable SkyTri landAbove(double x, double y, double z) {
-		List<SkyTri> column = new ArrayList<>();
-		SkyCollision.originalSurfacesNear(new AABB(x - 0.01, y, z - 0.01, x + 0.01, y + 32, z + 0.01), column);
-		SkyTri best = null;
-		double bestHeight = Double.POSITIVE_INFINITY;
-		for (SkyTri t : column) {
-			if (!t.terrain) {
-				continue;
-			}
-			double h = t.heightAt(x, z);
-			if (!Double.isNaN(h) && h >= y && h < bestHeight) {
-				bestHeight = h;
-				best = t;
-			}
-		}
-		return best;
+		return SkyGround.landAbove(SURFACES, x, y, z);
 	}
 
 	/** What's this deep behind a surface of this material: grass has dirt under it, then stone. */
 	public static int underground(int surface, double depth) {
-		return switch (surface) {
-			case DIG_GRASS, DIG_DIRT -> depth < 3.5 ? DIG_DIRT : DIG_STONE;
-			case DIG_MUD -> depth < 3.5 ? DIG_MUD : DIG_STONE;
-			case DIG_SNOW -> depth < 1.5 ? DIG_SNOW : depth < 3.5 ? DIG_DIRT : DIG_STONE;
-			case DIG_SAND -> depth < 3.5 ? DIG_SAND : DIG_STONE;
-			case DIG_GRAVEL -> depth < 2.5 ? DIG_GRAVEL : DIG_STONE;
-			case DIG_ASH -> depth < 3.5 ? DIG_ASH : DIG_STONE;
-			case DIG_ICE -> depth < 2.5 ? DIG_ICE : DIG_STONE;
-			case DIG_COBBLE -> depth < 1.5 ? DIG_COBBLE : DIG_STONE;
-			case DIG_OAK_LOG, DIG_SPRUCE_LOG, DIG_BIRCH_LOG -> surface;
-			case DIG_PLANKS -> depth < 2.5 ? DIG_PLANKS : DIG_STONE;
-			case DIG_METAL -> depth < 1.5 ? DIG_METAL : DIG_STONE;
-			case DIG_GLASS, DIG_ORGANIC, DIG_CLOTH, DIG_BONE, DIG_WEB -> depth < 1.0 ? surface : DIG_STONE;
-			default -> DIG_STONE;
-		};
+		return SkyGround.underground(surface, depth);
 	}
 
 	// ---- collision for the walls of dug holes -------------------------------------------------
@@ -625,10 +518,10 @@ public final class SkyDig {
 
 	/** Skyrim's surfaces in this box changed: the walls that could see them are worked out again. */
 	public static void wallsChanged(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
-		int reach = (int) Math.ceil(SEARCH) + 1;
-		int down = reach + (int) Math.ceil(LAND_REACH); // a cell looks this far up for the land over it
+		int reach = (int) Math.ceil(SkyGround.SIDE_REACH) + 1; // a cell looks this far sideways
+		int down = reach + (int) Math.ceil(SkyGround.DEEP_REACH); // and this far up for the land over it
 		for (int sx = (minX - reach) >> 4; sx <= (maxX + reach) >> 4; sx++) {
-			for (int sy = (minY - down) >> 4; sy <= (maxY + reach) >> 4; sy++) {
+			for (int sy = (minY - down) >> 4; sy <= (maxY + (int) SkyGround.COLUMN_REACH) >> 4; sy++) {
 				for (int sz = (minZ - reach) >> 4; sz <= (maxZ + reach) >> 4; sz++) {
 					WALLS.remove(net.minecraft.core.SectionPos.asLong(sx, sy, sz));
 				}
@@ -703,24 +596,21 @@ public final class SkyDig {
 
 	private static @Nullable VoxelShape computeWall(int x, int y, int z) {
 		Probe probe = new Probe().around(x, y, z, x + 1, y + 1, z + 1);
-		if (!probe.land.isEmpty()) {
-			// Solid up to the lowest the land gets over the cell (never above the ground).
-			double lowest = Double.POSITIVE_INFINITY;
-			for (double[] c : new double[][] { { 0.05, 0.05 }, { 0.95, 0.05 }, { 0.05, 0.95 }, { 0.95, 0.95 }, { 0.5, 0.5 } }) {
-				double h = probe.landHeight(x + c[0], z + c[1]);
-				if (!Double.isNaN(h)) {
-					lowest = Math.min(lowest, h);
-				}
-			}
-			if (Double.isFinite(lowest) && lowest - y > 0.05) {
-				return lowest - y >= 0.999 ? Shapes.block() : Shapes.box(0, 0, 0, 1, lowest - y, 1);
-			}
-			if (probe.tris.isEmpty()) {
-				return null;
+		// Under the land, however deep: solid up to the lowest the land gets over the cell (never
+		// above the ground).
+		double lowest = Double.POSITIVE_INFINITY;
+		for (double[] c : new double[][] { { 0.05, 0.05 }, { 0.95, 0.05 }, { 0.05, 0.95 }, { 0.95, 0.95 }, { 0.5, 0.5 } }) {
+			double h = probe.landOver(x + c[0], z + c[1]);
+			if (!Double.isNaN(h)) {
+				lowest = Math.min(lowest, h);
 			}
 		}
-		// Rocks, cave walls: solid if the middle is inside.
-		return probe.test(x + 0.5, y + 0.5, z + 0.5) > AIR ? Shapes.block() : null;
+		if (Double.isFinite(lowest) && lowest - y > 0.05) {
+			return lowest - y >= 0.999 ? Shapes.block() : Shapes.box(0, 0, 0, 1, lowest - y, 1);
+		}
+		// Rocks, cave walls, interiors: solid if the middle is inside (checked sideways too, so the
+		// rock out past an interior's rooms holds).
+		return probe.testSolid(x + 0.5, y + 0.5, z + 0.5) > AIR ? Shapes.block() : null;
 	}
 
 	/**
@@ -732,55 +622,4 @@ public final class SkyDig {
 	}
 
 	public static volatile @Nullable DugLookup clientDug;
-
-	/** Closest point on the triangle to p (Ericson, Real-Time Collision Detection 5.1.5). */
-	static void closestPoint(SkyTri t, double px, double py, double pz, double[] out) {
-		double abx = t.bx - t.ax, aby = t.by - t.ay, abz = t.bz - t.az;
-		double acx = t.cx - t.ax, acy = t.cy - t.ay, acz = t.cz - t.az;
-		double apx = px - t.ax, apy = py - t.ay, apz = pz - t.az;
-		double d1 = abx * apx + aby * apy + abz * apz, d2 = acx * apx + acy * apy + acz * apz;
-		if (d1 <= 0 && d2 <= 0) {
-			set(out, t.ax, t.ay, t.az);
-			return;
-		}
-		double bpx = px - t.bx, bpy = py - t.by, bpz = pz - t.bz;
-		double d3 = abx * bpx + aby * bpy + abz * bpz, d4 = acx * bpx + acy * bpy + acz * bpz;
-		if (d3 >= 0 && d4 <= d3) {
-			set(out, t.bx, t.by, t.bz);
-			return;
-		}
-		double vc = d1 * d4 - d3 * d2;
-		if (vc <= 0 && d1 >= 0 && d3 <= 0) {
-			double v = d1 / (d1 - d3);
-			set(out, t.ax + abx * v, t.ay + aby * v, t.az + abz * v);
-			return;
-		}
-		double cpx = px - t.cx, cpy = py - t.cy, cpz = pz - t.cz;
-		double d5 = abx * cpx + aby * cpy + abz * cpz, d6 = acx * cpx + acy * cpy + acz * cpz;
-		if (d6 >= 0 && d5 <= d6) {
-			set(out, t.cx, t.cy, t.cz);
-			return;
-		}
-		double vb = d5 * d2 - d1 * d6;
-		if (vb <= 0 && d2 >= 0 && d6 <= 0) {
-			double w = d2 / (d2 - d6);
-			set(out, t.ax + acx * w, t.ay + acy * w, t.az + acz * w);
-			return;
-		}
-		double va = d3 * d6 - d5 * d4;
-		if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
-			double w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-			set(out, t.bx + (t.cx - t.bx) * w, t.by + (t.cy - t.by) * w, t.bz + (t.cz - t.bz) * w);
-			return;
-		}
-		double denom = 1.0 / (va + vb + vc);
-		double v = vb * denom, w = vc * denom;
-		set(out, t.ax + abx * v + acx * w, t.ay + aby * v + acy * w, t.az + abz * v + acz * w);
-	}
-
-	private static void set(double[] out, double x, double y, double z) {
-		out[0] = x;
-		out[1] = y;
-		out[2] = z;
-	}
 }

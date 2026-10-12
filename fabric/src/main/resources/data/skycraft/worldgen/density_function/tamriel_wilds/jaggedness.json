@@ -1,0 +1,13 @@
+{
+  "type": "minecraft:cache",
+  "input": {
+    "type": "minecraft:lerp",
+    "alpha": "skycraft:tamriel_wilds/mountains",
+    "first": "minecraft:overworld/jaggedness",
+    "second": {
+      "type": "minecraft:mul",
+      "left": "minecraft:overworld_amplified/jaggedness",
+      "right": 0.8
+    }
+  }
+}

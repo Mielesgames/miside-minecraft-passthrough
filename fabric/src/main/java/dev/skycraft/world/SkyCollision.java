@@ -5,6 +5,8 @@ import static java.lang.foreign.ValueLayout.*;
 
 import dev.skycraft.SkyCraft;
 import dev.skycraft.link.SkyLink;
+import dev.skycraft.link.SkySpace;
+import dev.skycraft.link.WorldSpaces;
 import java.lang.foreign.MemorySegment;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -19,6 +21,12 @@ import org.jspecify.annotations.Nullable;
  * Skyrim's world geometry as Minecraft sees it: an 8x8x8 sub-voxel collision shape per block
  * position, streamed from the SKSE plugin. These are not blocks; they are merged into block
  * collision queries (see BlockCollisionsMixin) so vanilla movement code collides with them.
+ *
+ * <p>Skyrim sends its world in that world's own terms; it's kept here in the mirror's, moved into the
+ * world's space (SkySpace). Each epoch is one Skyrim world: COL_CLEAR names it (or, from an older
+ * plugin, SkyState does once it shows the epoch). Should the world's space change while its collision
+ * is held (the table opened after Skyrim had started streaming, or a guest heard its space late),
+ * everything held moves with it.
  */
 public final class SkyCollision {
 	/** Skyrim regions are streamed as cubes of this many blocks. Must match the SKSE side. */
@@ -49,6 +57,13 @@ public final class SkyCollision {
 	private static final Set<Long> KNOWN_REGIONS = ConcurrentHashMap.newKeySet();
 	private static volatile int epoch = -1;
 	private static Thread consumer;
+	// The Skyrim world this epoch's collision is of, once known, and the space origin everything held
+	// was moved by (consumer thread only).
+	private static boolean epochWorldKnown;
+	private static int epochWorld;
+	private static int heldX, heldZ;
+	private static int heldVersion = Integer.MIN_VALUE;
+	private static final SkyLink.SkyState STATE = new SkyLink.SkyState();
 
 	private SkyCollision() {
 	}
@@ -205,6 +220,7 @@ public final class SkyCollision {
 	private static void consumeLoop() {
 		while (true) {
 			try {
+				followSpace();
 				if (!drainOnce()) {
 					Thread.sleep(2);
 				}
@@ -233,6 +249,7 @@ public final class SkyCollision {
 			return false;
 		}
 		long data = OFF_COLLISION_RING + CR_DATA;
+		long from = tail;
 		while (tail < head) {
 			long pos = tail % CR_DATA_BYTES;
 			int type = s.get(JAVA_INT, data + pos);
@@ -242,8 +259,19 @@ public final class SkyCollision {
 				continue;
 			}
 			long payload = data + pos + 8;
+			if (type == COL_REGION || type == COL_TRIS) {
+				int msgEpoch = s.get(JAVA_INT, payload + 24);
+				adoptEpochIfFresh(msgEpoch);
+				if (msgEpoch == epoch && !knowWorld()) {
+					if (!skyrimIsPast(msgEpoch)) {
+						break; // whose world this is shows in SkyState within a frame: wait for it, then go on
+					}
+					tail += align8(8 + payloadBytes); // Skyrim has left that world already
+					continue;
+				}
+			}
 			switch (type) {
-				case COL_CLEAR -> clear(s.get(JAVA_INT, payload));
+				case COL_CLEAR -> clear(s.get(JAVA_INT, payload), payloadBytes >= 8, payloadBytes >= 8 ? s.get(JAVA_INT, payload + 4) : 0);
 				case COL_REGION -> readRegion(s, payload);
 				case COL_TRIS -> readTris(s, payload);
 				default -> SkyCraft.LOG.warn("SkyCraft: unknown collision message {}", type);
@@ -251,22 +279,118 @@ public final class SkyCollision {
 			tail += align8(8 + payloadBytes);
 		}
 		SkyLink.setCollisionTail(tail);
-		return true;
+		return tail != from;
+	}
+
+	/** Whether this epoch's world is known (from COL_CLEAR, or SkyState showing the epoch now). */
+	private static boolean knowWorld() {
+		if (epochWorldKnown) {
+			return true;
+		}
+		if (SkyLink.readSkyState(STATE) && STATE.collisionEpoch == epoch) {
+			holdWorld(STATE.worldId);
+			return true;
+		}
+		return false;
+	}
+
+	/** SkyState (as knowWorld last read it) is on a later epoch: a message of {@code msgEpoch} is stale. */
+	private static boolean skyrimIsPast(int msgEpoch) {
+		return STATE.seq != 0 && STATE.collisionEpoch - msgEpoch > 0;
+	}
+
+	/** This epoch's regions are the world's: they go into its space. Nothing is held yet. */
+	private static void holdWorld(int world) {
+		epochWorld = world;
+		epochWorldKnown = true;
+		heldVersion = SkySpace.version();
+		int space = SkySpace.space(world, null);
+		heldX = WorldSpaces.originX(space);
+		heldZ = WorldSpaces.originZ(space);
+		SkyCraft.LOG.info("SkyCraft: collision epoch {} is Skyrim world {} (space {}, at {} {})", epoch, String.format("%08X", world), space, heldX, heldZ);
+	}
+
+	/** The held world's space changed (SkySpace): everything held moves there. Consumer thread. */
+	private static void followSpace() {
+		if (!epochWorldKnown) {
+			return;
+		}
+		int version = SkySpace.version();
+		if (version == heldVersion) {
+			return;
+		}
+		heldVersion = version;
+		int space = SkySpace.space(epochWorld, null);
+		int x = WorldSpaces.originX(space), z = WorldSpaces.originZ(space);
+		if (x != heldX || z != heldZ) {
+			rebase(x - heldX, z - heldZ);
+			SkyCraft.LOG.info("SkyCraft: Skyrim world {}'s collision moved to its space {} at {} {}", String.format("%08X", epochWorld), space, x, z);
+			heldX = x;
+			heldZ = z;
+		}
+	}
+
+	/** Moves everything held by whole regions (dx, dz are multiples of the space spacing). */
+	private static void rebase(int dx, int dz) {
+		moveKeys(SHAPES, dx, 0, dz);
+		moveKeys(FILL, dx, 0, dz);
+		int rx = dx / REGION_SIZE, rz = dz / REGION_SIZE;
+		moveTris(TRIS, rx, rz, dx, dz);
+		moveTris(GHOSTS, rx, rz, dx, dz);
+		moveKeys(TRI_HASH, rx, 0, rz);
+		java.util.List<Long> known = new java.util.ArrayList<>(KNOWN_REGIONS);
+		KNOWN_REGIONS.clear();
+		for (long key : known) {
+			KNOWN_REGIONS.add(BlockPos.offset(key, rx, 0, rz));
+		}
+		// The walls of dug holes there are worked out again where they are now.
+		CHANGED.clear();
+		for (long key : TRIS.keySet()) {
+			CHANGED.add(BlockPos.asLong(BlockPos.getX(key) * REGION_SIZE, BlockPos.getY(key) * REGION_SIZE, BlockPos.getZ(key) * REGION_SIZE));
+		}
+		SkyDig.wallsChanged();
+	}
+
+	private static <V> void moveKeys(ConcurrentHashMap<Long, V> map, int dx, int dy, int dz) {
+		java.util.HashMap<Long, V> moved = new java.util.HashMap<>(map.size() * 2);
+		map.forEach((key, value) -> moved.put(BlockPos.offset(key, dx, dy, dz), value));
+		map.clear();
+		map.putAll(moved);
+	}
+
+	private static void moveTris(ConcurrentHashMap<Long, SkyTri[]> map, int rx, int rz, int dx, int dz) {
+		java.util.HashMap<Long, SkyTri[]> moved = new java.util.HashMap<>(map.size() * 2);
+		map.forEach((key, tris) -> {
+			SkyTri[] out = new SkyTri[tris.length];
+			for (int i = 0; i < tris.length; i++) {
+				out[i] = tris[i].shifted(dx, dz);
+			}
+			moved.put(BlockPos.offset(key, rx, 0, rz), out);
+		});
+		map.clear();
+		map.putAll(moved);
 	}
 
 	private static long align8(long v) {
 		return (v + 7) & ~7L;
 	}
 
+	/** The collision epoch: it changes whenever Skyrim clears its world for Minecraft (a new cell or worldspace). */
+	public static int epoch() {
+		return epoch;
+	}
+
 	/** A freshly started client joins whatever collision epoch Skyrim is already on. */
 	private static void adoptEpochIfFresh(int msgEpoch) {
 		if (epoch == -1) {
 			epoch = msgEpoch;
+			epochWorldKnown = false;
 			SkyCraft.LOG.info("SkyCraft: joined collision epoch {} already in progress", msgEpoch);
 		}
 	}
 
-	private static void clear(int newEpoch) {
+	/** A new epoch: Skyrim's world (named by {@code world} when {@code named}) is described from scratch. */
+	private static void clear(int newEpoch, boolean named, int world) {
 		SHAPES.clear();
 		FILL.clear();
 		TRIS.clear();
@@ -274,19 +398,23 @@ public final class SkyCollision {
 		TRI_HASH.clear();
 		KNOWN_REGIONS.clear();
 		epoch = newEpoch;
+		epochWorldKnown = false;
 		SkyCraft.LOG.info("SkyCraft: collision cleared (epoch {})", newEpoch);
+		if (named) {
+			holdWorld(world);
+		}
 	}
 
 	private static void readRegion(MemorySegment s, long p) {
-		int minX = s.get(JAVA_INT, p);
+		// Into the world's space (whole regions: spaces are a multiple of REGION_SIZE apart).
+		int minX = s.get(JAVA_INT, p) + heldX;
 		int minY = s.get(JAVA_INT, p + 4);
-		int minZ = s.get(JAVA_INT, p + 8);
-		int maxX = s.get(JAVA_INT, p + 12);
+		int minZ = s.get(JAVA_INT, p + 8) + heldZ;
+		int maxX = s.get(JAVA_INT, p + 12) + heldX;
 		int maxY = s.get(JAVA_INT, p + 16);
-		int maxZ = s.get(JAVA_INT, p + 20);
+		int maxZ = s.get(JAVA_INT, p + 20) + heldZ;
 		int msgEpoch = s.get(JAVA_INT, p + 24);
 		int count = s.get(JAVA_INT, p + 28);
-		adoptEpochIfFresh(msgEpoch);
 		if (msgEpoch != epoch) {
 			return; // stale region from before a world change
 		}
@@ -296,9 +424,9 @@ public final class SkyCollision {
 		java.util.HashMap<Long, Integer> freshFill = new java.util.HashMap<>(count * 2);
 		long e = p + COL_REGION_HEADER_BYTES;
 		for (int i = 0; i < count; i++, e += COL_BLOCK_BYTES) {
-			int x = s.get(JAVA_INT, e);
+			int x = s.get(JAVA_INT, e) + heldX;
 			int y = s.get(JAVA_INT, e + 4);
-			int z = s.get(JAVA_INT, e + 8);
+			int z = s.get(JAVA_INT, e + 8) + heldZ;
 			VoxelShape shape = buildShape(s, e + 16);
 			if (shape != null) {
 				long key = BlockPos.asLong(x, y, z);
@@ -333,12 +461,11 @@ public final class SkyCollision {
 	}
 
 	private static void readTris(MemorySegment s, long p) {
-		int minX = s.get(JAVA_INT, p);
+		int minX = s.get(JAVA_INT, p) + heldX;
 		int minY = s.get(JAVA_INT, p + 4);
-		int minZ = s.get(JAVA_INT, p + 8);
+		int minZ = s.get(JAVA_INT, p + 8) + heldZ;
 		int msgEpoch = s.get(JAVA_INT, p + 24);
 		int count = s.get(JAVA_INT, p + 28);
-		adoptEpochIfFresh(msgEpoch);
 		if (msgEpoch != epoch) {
 			return;
 		}
@@ -355,7 +482,7 @@ public final class SkyCollision {
 			}
 			int flags = s.get(JAVA_INT, e + 36);
 			hash = hash * 31 + flags;
-			SkyTri t = new SkyTri(v, 0, flags);
+			SkyTri t = new SkyTri(v, 0, flags, heldX, heldZ);
 			if (t.degenerate()) {
 				continue;
 			}

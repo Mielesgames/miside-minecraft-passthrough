@@ -56,6 +56,13 @@ public final class InputBridge {
 				cursorY = b;
 				minecraft.mouseHandler.onMove(handle, a, b, dx, dy);
 			}
+			case Proto.IN_LOOK -> {
+				// Minecraft view: raw mouse motion, turned into a look by Minecraft itself (sensitivity,
+				// invert, smooth camera, spyglass) as from a grabbed mouse. Skyrim's look is for the mirror.
+				if (MinecraftView.away()) {
+					minecraft.mouseHandler.onMove(handle, cursorX, cursorY, a, b);
+				}
+			}
 			case Proto.IN_TEXT -> {
 				if (minecraft.gui.screen() != null) {
 					minecraft.keyboardHandler.textInput(handle, new String(Character.toChars(a)));
@@ -77,8 +84,8 @@ public final class InputBridge {
 	/** Skyrim hit the player: apply it as Minecraft damage on the integrated server (or the host's). */
 	private static void hurt(Minecraft minecraft, int kind, float skyrimDamage, int attacker, int flags) {
 		var server = minecraft.getSingleplayerServer();
-		if (minecraft.player == null) {
-			return;
+		if (minecraft.player == null || MinecraftView.away()) {
+			return; // (in another dimension Skyrim's player is parked: a late hit from before)
 		}
 		if (server == null) {
 			// A guest in a friend's world: the host's server applies it.

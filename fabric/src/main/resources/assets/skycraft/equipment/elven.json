@@ -1,0 +1,14 @@
+{
+  "layers": {
+    "humanoid": [
+      {
+        "texture": "skycraft:elven"
+      }
+    ],
+    "humanoid_leggings": [
+      {
+        "texture": "skycraft:elven"
+      }
+    ]
+  }
+}

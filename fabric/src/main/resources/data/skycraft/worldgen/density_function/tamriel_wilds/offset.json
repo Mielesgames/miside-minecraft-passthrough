@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:cache",
+  "input": {
+    "type": "minecraft:lerp",
+    "alpha": "skycraft:tamriel_wilds/mountains",
+    "first": "minecraft:overworld/offset",
+    "second": "minecraft:overworld_amplified/offset"
+  }
+}

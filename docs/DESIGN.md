@@ -63,9 +63,11 @@ mc.pitch = f(sky.rotX)
 ```
 
 - **Vertical range:** Skyrim terrain spans more than 384 blocks (the Throat of the World is well above MC's default build height). The mirror world therefore uses a **custom `dimension_type`** with an expanded range (up to min_y −2032 / height 4064).
-- **Worldspaces:** each Skyrim worldspace (Tamriel, Solstheim, etc.) maps to its own MC dimension.
-- **Interiors:** interior cells live in one `skycraft:interiors` dimension. Each interior cell gets its own 1024×1024 region slot, allocated by FormID.
-- Changing cell or worldspace in Skyrim (load doors) moves the MC player to the matching dimension or slot.
+- **World spaces** (2026-10-11): Skyrim's worlds overlap (every interior cell sits near 0,0, and so does the middle of Tamriel), but the mirror is one Minecraft dimension. So every Skyrim world, each exterior worldspace and each interior cell as `SkyState.worldId` names it, keeps its blocks in a **space** of its own: a square 32,768 blocks across in the mirror. Tamriel's space is space 0, at the origin (so outdoor builds never moved); the others are numbered in the order they are first visited and laid out on a square spiral round it (space 1 at x 32,768, space 2 at 32,768, 32,768, ...). A Skyrim position p is at Minecraft `p / 70 + origin`. Placed, dug and revealed blocks, breach rooms, portals, actor stand-ins and the player all follow, since they all live at mirror positions.
+  - **Minecraft owns the table** (`skycraft-spaces.txt` in the Minecraft world, beside the blocks it describes, so loading an older Skyrim save or starting a new character never reshuffles it). A guest's client gets a copy from the host's server (`SkyNet.Spaces`, and asks with `SpaceAsk` for a world the host hasn't seen).
+  - **Skyrim never sees a space.** Everything on the link stays in the current Skyrim world's own terms (`SkyToMc` / `McToSky` unchanged, float protocol fields stay small and precise). Java converts in one place, the link boundary: `SkyLink` reads (SkyState, actors, water, breach table) come out moved into the space of the world Skyrim names, its writes (McState, world entities, events with positions) go out in the terms of whatever space the position is in (`SkySpace.local`), the collision ring is moved by `SkyCollision` (each epoch is one world: `kColClear` names it), and the render ring's section headers by the client exporters. `McState.spaceWorld` tells Skyrim which world's space the player is in, for the log.
+  - **World change:** Skyrim bumps `collisionEpoch` and `teleportSeq` as before; Minecraft teleports the player into the new world's space, and the exporter, seeing Skyrim's world change space, sends `kRenClearAll` and only exports that space's sections from then on, so nothing of the last world is drawn in the next.
+  - **Worlds made before spaces** are sorted once when the host's world starts (`SpaceMigration`): Tamriel's blocks stay; every other world's dug cells (kept per world in each chunk) move into its space with the blocks in them and any build standing against them; blocks nothing ties to a world stay in Tamriel's space.
 
 ## 5. The mirror world (Minecraft side)
 
@@ -120,11 +122,7 @@ Later: a Mixin on fluid-state queries reports `water` inside Skyrim water volume
   - **Gameplay:** input goes to MC. Skyrim receives only a small allow-list: Esc for the Skyrim journal/system menu, and the Skyrim "Activate" route described below.
   - **MC screen open** (inventory, crafting, chest): input goes to MC and the MC cursor is shown in the overlay.
   - **Skyrim menu open** (dialogue, barter, lockpicking, map, loading screen): input goes to Skyrim and the MC client is frozen.
-- **"Use" arbitration:** when you press MC's use key, both sides pick a target:
-  - MC's ray pick (blocks and actor proxies)
-  - Skyrim's crosshair pick (doors, containers, NPCs to talk to, items)
-
-  The **nearest target wins**. A Skyrim target becomes a Skyrim `Activate`. That is how you open doors, loot, and start dialogue.
+- **"Use" arbitration:** G is Skyrim's `Activate` on whatever Skyrim's crosshair pick is on (doors, containers, NPCs to talk to, items, furniture). MC's use key (right click) goes to MC first, and MC's own rules decide: the held item is used, and blocks and actor proxies (a merchant's trade screen) take the click. Only a fresh press that MC had no use for, with nothing in either hand that right click is meant for, falls through: MC sends `kEvActivate` and Skyrim runs the same `Activate` as G on its crosshair target at that moment (`click_to_activate` switch, `ClickActivate`, `Input::UpdateClickActivate`). That is how you open doors, loot, and start dialogue.
 
 ## 8. Combat
 

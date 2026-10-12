@@ -22,7 +22,7 @@ final class ProxySync {
 	}
 
 	static void frame(Minecraft minecraft) {
-		if (minecraft.level == null || !SkyLink.readActors(ACTORS)) {
+		if (minecraft.level == null || !dev.skycraft.SkyDimension.inMirror(minecraft.level) || !SkyLink.readActors(ACTORS)) {
 			return;
 		}
 		BY_ID.clear();

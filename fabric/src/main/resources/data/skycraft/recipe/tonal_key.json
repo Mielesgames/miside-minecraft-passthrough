@@ -1,0 +1,12 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    "skycraft:dwarven_metal_ingot",
+    "minecraft:redstone",
+    "minecraft:amethyst_shard"
+  ],
+  "result": {
+    "id": "skycraft:tonal_key"
+  }
+}

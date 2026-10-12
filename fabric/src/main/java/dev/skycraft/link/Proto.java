@@ -8,7 +8,7 @@ public final class Proto {
 	}
 
 	public static final int MAGIC = 0x43594B53;
-	public static final int VERSION = 11;
+	public static final int VERSION = 13;
 	// A second client on the same PC (multiplayer testing) talks to its own stand-in Skyrim:
 	// -Dskycraft.link=Local\SkyCraft_guest (see tools/fake_guest.py).
 	public static final String MAPPING_NAME = System.getProperty("skycraft.link", "Local\\SkyCraft_v1");
@@ -32,7 +32,9 @@ public final class Proto {
 	public static final int OVERLAY_SLOTS = 3;
 	public static final long OFF_ACTOR_TABLE = 0x12000;
 	public static final long OFF_EVENT_RING = 0x17000;
+	public static final long OFF_ITEM_RING = 0x1B100;
 	public static final long OFF_WORLD_ENTITIES = 0x1C000;
+	public static final long OFF_BREACH_TABLE = 0x1FC40;
 	public static final long OFF_RENDER_RING = OFF_OVERLAY_PIXELS + OVERLAY_SLOT_BYTES * OVERLAY_SLOTS;
 	public static final long RENDER_RING_BYTES = 64L << 20;
 	public static final long MAPPING_BYTES = OFF_RENDER_RING + RENDER_RING_BYTES;
@@ -57,6 +59,26 @@ public final class Proto {
 	public static final int ACTOR_DEAD = 1 << 1;
 	public static final int ACTOR_ESSENTIAL = 1 << 2;
 	public static final int ACTOR_IN_COMBAT = 1 << 3;
+	/** A creature EV_SPAWN_CREATURE brought. */
+	public static final int ACTOR_SPAWNED = 1 << 4;
+	/**
+	 * Companions (added within protocol 13; an older Skyrim plugin never sets it): the player's animal. Tamed through
+	 * Minecraft (EV_COMPANION), Skyrim's own animal follower (Meeko, Vigilance, a stray or bought dog, ...), another dog,
+	 * wolf or horse that is the player's teammate, or a horse the player owns.
+	 */
+	public static final int ACTOR_COMPANION = 1 << 5;
+	/** A companion that isn't following now: told to wait (sit), or another animal holds Skyrim's one animal follower slot. */
+	public static final int ACTOR_COMPANION_WAITING = 1 << 6;
+	/** Bits 8-11 of the actor flags: the actor's ANIMAL_* kind, from its race (Skyrim's AnimalKinds.h). Added within 13. */
+	public static final int ACTOR_KIND_SHIFT = 8;
+	public static final int ACTOR_KIND_MASK = 0xF << ACTOR_KIND_SHIFT;
+	// AnimalKind
+	public static final int ANIMAL_NONE = 0;
+	/** Dogs, huskies, death hounds: tamed like a Minecraft wolf. */
+	public static final int ANIMAL_DOG = 1;
+	/** Wolves (not werewolves): tamed like a Minecraft wolf. */
+	public static final int ANIMAL_WOLF = 2;
+	public static final int ANIMAL_HORSE = 3;
 
 	// Event ring (relative to OFF_EVENT_RING)
 	public static final int EVENT_RING_ENTRIES = 512;
@@ -69,6 +91,98 @@ public final class Proto {
 	public static final int EV_EXPLOSION = 3;
 	public static final int EV_ARROW_STUCK = 4;
 	public static final int EV_SKILL_USE = 5;
+	/** Minecraft converted a looted item: formId = the item's base form, a = how many Skyrim removes. */
+	public static final int EV_TAKE_ITEM = 6;
+	/** The player slept in a Minecraft bed: a = game hours Skyrim passes. */
+	public static final int EV_SLEEP = 7;
+	/**
+	 * A Skyrim creature comes out of the dark in a dug tunnel: formId = SPAWN_* kind, a/b/c = its feet (MC coords),
+	 * d = despawn distance (blocks), flags = most spawned creatures alive at once.
+	 */
+	public static final int EV_SPAWN_CREATURE = 8;
+	/** The player opened a breach door underground: formId = the dungeon's exterior load door (BreachRecord doorRef). */
+	public static final int EV_ENTER_DUNGEON = 9;
+	/**
+	 * A fresh right click Minecraft had no use for (client ClickActivate): Skyrim activates whatever its crosshair is
+	 * on, as G does, at most once per 0.4 s. No fields. Added within protocol 13; an older Skyrim plugin ignores it.
+	 */
+	public static final int EV_ACTIVATE = 10;
+	/**
+	 * The host stood in a bound portal (portal.SkyPortals): Skyrim moves the player to its partner behind a loading screen,
+	 * as a load door does. formId = the destination Skyrim world as SkyState worldId names it (a worldspace FormID outside,
+	 * an interior cell FormID when flags has PORTAL_INTERIOR), a/b/c = where the feet go (MC coords, just in front of the
+	 * partner portal on its exit side), d = the yaw to face (MC degrees), weapon = SkyState worldId when sent (Skyrim drops
+	 * the request once the player is anywhere else). Added within protocol 13; an older Skyrim plugin ignores it.
+	 */
+	public static final int EV_PORTAL_TRAVEL = 11;
+	/** EV_PORTAL_TRAVEL flags: the destination formId is an interior cell. */
+	public static final int PORTAL_INTERIOR = 1;
+	/**
+	 * Companions (companion.SkyCompanions): Minecraft's taming rules on a Skyrim animal. formId = the actor, flags = a
+	 * COMPANION_* action, weapon = the ANIMAL_* kind read for it in the actor table (Skyrim refuses a taming whose kind
+	 * isn't its own), a = COMPANION_HEAL's share of the animal's maximum health (0..1). Added within protocol 13 (event
+	 * 12 and 13 are the Minecraft view's); an older Skyrim plugin ignores it.
+	 */
+	public static final int EV_COMPANION = 14;
+	/** The taming roll came up: dogs and wolves become Skyrim's animal follower, waiting (sitting); horses the player's own. */
+	public static final int COMPANION_TAME = 1;
+	/** Follow the player (taking Skyrim's one animal follower slot). */
+	public static final int COMPANION_FOLLOW = 2;
+	/** Wait here (sit). */
+	public static final int COMPANION_WAIT = 3;
+	/** Fed: restore a share of its health. */
+	public static final int COMPANION_HEAL = 4;
+
+	// Breach table (relative to OFF_BREACH_TABLE): Skyrim -> MC, seqlock, see BreachTable in the protocol header.
+	public static final int MAX_BREACHES = 16;
+	public static final long BT_SEQ = 0x00;
+	public static final long BT_COUNT = 0x04;
+	public static final long BT_WORLD_ID = 0x08;
+	public static final long BT_RECORDS = 0x10;
+	public static final long BREACH_RECORD_BYTES = 56;
+	// BreachRecord fields
+	public static final long BR_DOOR_REF = 0;
+	public static final long BR_LOCATION = 4;
+	public static final long BR_X = 8;
+	public static final long BR_Y = 12;
+	public static final long BR_Z = 16;
+	public static final long BR_YAW = 20;
+	public static final long BR_THEME = 24;
+	public static final long BR_FLAGS = 25;
+	public static final long BR_LEVEL = 26;
+	public static final long BR_NAME = 28;
+	public static final int BR_NAME_BYTES = 28;
+	// BreachTheme
+	public static final int THEME_CAVE = 0;
+	public static final int THEME_NORDIC = 1;
+	public static final int THEME_DWEMER = 2;
+	public static final int THEME_FALMER = 3;
+	public static final int THEME_MINE = 4;
+	public static final int THEME_FORT = 5;
+	public static final int THEME_LAIR = 6;
+	// BreachFlags
+	public static final int BREACH_DISCOVERED = 1;
+	public static final int BREACH_CLEARED = 1 << 1;
+	// SpawnKind
+	public static final int SPAWN_SKEEVER = 1;
+	public static final int SPAWN_SKELETON = 2;
+	public static final int SPAWN_DRAUGR = 3;
+
+	// Item ring (relative to OFF_ITEM_RING): Skyrim -> MC, see ItemEvent in the protocol header.
+	public static final int ITEM_RING_ENTRIES = 64;
+	public static final long ITR_HEAD = 0x00;
+	public static final long ITR_TAIL = 0x40;
+	public static final long ITR_DATA = 0x80;
+	public static final long ITEM_BYTES = 48;
+	// ItemSource
+	public static final int SRC_WORLD = 0;
+	public static final int SRC_CORPSE = 1;
+	public static final int SRC_CONTAINER = 2;
+	public static final int SRC_ACTOR = 3;
+	/** Bought from a merchant in Skyrim's barter menu. */
+	public static final int SRC_BOUGHT = 4;
+	/** Skyrim skill (ActorValue) trained by trading with a Minecraft merchant screen. */
+	public static final int SKILL_SPEECH = 17;
 	// Skyrim skills (ActorValue) Minecraft reports use of; weapon skills come from EV_HIT_ACTOR.
 	public static final int SKILL_BLOCK = 9;
 	public static final int SKILL_SMITHING = 10;
@@ -144,6 +258,30 @@ public final class Proto {
 	public static final long SS_VIEWPORT_W = 0x34;
 	public static final long SS_VIEWPORT_H = 0x38;
 	public static final long SS_GAME_HOUR = 0x3C;
+	public static final long SS_TOWN = 0x40;   // char[32]
+	public static final long SS_PLACE = 0x60;  // PlaceFlags
+	/** CarriedFlags: quest items the Skyrim player carries. Was the reserved field (0), added within 13. */
+	public static final long SS_CARRIED = 0x64;
+	public static final int PLACE_INTERIOR = 1;
+	public static final int PLACE_DUNGEON = 1 << 1;
+	public static final int PLACE_TOWN = 1 << 2;
+	/** SkyState.carried: an Elder Scroll is in the Skyrim player's inventory (opens the Time-Wound portal onto Home). */
+	public static final int CARRY_ELDER_SCROLL = 1;
+
+	// VendorBuys (ActorRecord.vendor): what a Skyrim merchant trades in, 0 = not a merchant.
+	public static final int VENDOR_ANY = 1;
+	public static final int VENDOR_WEAPON = 1 << 1;
+	public static final int VENDOR_ARMOR = 1 << 2;
+	public static final int VENDOR_INGOT = 1 << 3;
+	public static final int VENDOR_POTION = 1 << 4;
+	public static final int VENDOR_INGREDIENT = 1 << 5;
+	public static final int VENDOR_FOOD = 1 << 6;
+	public static final int VENDOR_ARROW = 1 << 7;
+	public static final int VENDOR_JEWELRY = 1 << 8;
+	public static final int VENDOR_BOOK = 1 << 9;
+	public static final int VENDOR_HIDE = 1 << 10;
+	public static final int VENDOR_TOOL = 1 << 11;
+	public static final int VENDOR_STOLEN = 1 << 12;
 
 	public static final int SKY_IN_GAME = 1;
 	public static final int SKY_MENU_OPEN = 1 << 1;
@@ -180,6 +318,13 @@ public final class Proto {
 	public static final long MS_TICK_MS = 0xB8;
 	public static final long MS_CAMERA_MODE = 0xC0;
 	public static final long MS_CAMERA_DISTANCE = 0xC4;
+	/**
+	 * The Skyrim world whose space (SkySpace) Minecraft's player stands in, 0 if none or not in the mirror, and that
+	 * space's origin (Minecraft blocks). Added within protocol 13; for Skyrim's log only.
+	 */
+	public static final long MS_SPACE_WORLD = 0xC8;
+	public static final long MS_SPACE_X = 0xCC;
+	public static final long MS_SPACE_Z = 0xD0;
 
 	public static final int MC_IN_WORLD = 1;
 	public static final int MC_SCREEN_OPEN = 1 << 1;
@@ -189,6 +334,14 @@ public final class Proto {
 	public static final int MC_DEAD = 1 << 5;
 	public static final int MC_SWIMMING = 1 << 6;
 	public static final int MC_FLYING = 1 << 7;
+	/** Minecraft view: the player is in a dimension other than the Skyrim mirror (client MinecraftView). */
+	public static final int MC_OTHER_DIMENSION = 1 << 8;
+	/**
+	 * Minecraft view event types (event ring): kept for leaving the mirror for another dimension (12) and coming back
+	 * (13). Not sent: Skyrim follows MC_OTHER_DIMENSION in McState instead.
+	 */
+	public static final int EV_ENTER_OTHER_DIMENSION = 12;
+	public static final int EV_LEAVE_OTHER_DIMENSION = 13;
 
 	// Overlay
 	public static final long OC_STATE = 0x00;
@@ -199,6 +352,10 @@ public final class Proto {
 	public static final long SH_HEIGHT = 0x04;
 	public static final long SH_FLAGS = 0x08;
 	public static final long SH_FRAME_ID = 0x10;
+	// OverlaySlotHdr.flags
+	public static final int OVERLAY_BOTTOM_UP = 1;
+	/** Minecraft view: a full opaque frame, shown over all of Skyrim's picture. */
+	public static final int OVERLAY_OPAQUE = 1 << 1;
 
 	// Input ring (relative to OFF_INPUT_RING)
 	public static final int INPUT_RING_ENTRIES = 4096;
@@ -211,6 +368,8 @@ public final class Proto {
 	public static final int IN_CURSOR = 4;
 	public static final int IN_TEXT = 5;
 	public static final int IN_RELEASE_ALL = 6;
+	/** Minecraft view only: a, b = raw mouse motion since the last one; Minecraft turns its player itself. */
+	public static final int IN_LOOK = 9;
 
 	// Collision ring (relative to OFF_COLLISION_RING)
 	public static final long CR_HEAD = 0x00;
@@ -218,6 +377,7 @@ public final class Proto {
 	public static final long CR_DATA = 0x80;
 	public static final long CR_DATA_BYTES = COLLISION_RING_BYTES - CR_DATA;
 	public static final int COL_PAD = 0;
+	/** Payload: u32 epoch, then (added within protocol 13) u32 worldId: the Skyrim world the epoch's regions are of. */
 	public static final int COL_CLEAR = 1;
 	public static final int COL_REGION = 2;
 	public static final int COL_TRIS = 3;

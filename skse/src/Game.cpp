@@ -1,4 +1,8 @@
 #include "Game.h"
+#include "Breach.h"
+#include "Loot.h"
+#include "Travel.h"
+#include "WorldState.h"
 
 #include "Collision.h"
 #include "Dig.h"
@@ -376,6 +380,158 @@ namespace skycraft
 			hud->uiMovie->SetVariable("_root.HUDMovieBaseInstance.StealthMeterInstance._visible", RE::GFxValue(!a_hide || a_sneaking));
 		}
 
+		// Skyrim's compass. Its HUD object reads one value, the player camera's yaw (Compass::Update,
+		// AE 51668, reads PlayerCamera +0x154 on every HUD update and hands it to the HUD's
+		// SetCompassAngle), and PlayerCamera::Update (AE 50784) refreshes that yaw from the player's
+		// heading only in its first and third person states. Skyrim also has an idle camera: once
+		// the player has given no input for fAutoVanityModeDelay (120 s by default), the camera
+		// update switches to its auto-vanity state. Only input that reaches PlayerControls resets
+		// that timer (the flag it checks, PlayerControls +0x4A, is set only by PlayerControls' own
+		// input handler, AE 42338), and while Minecraft drives that handler gets nothing (Input.cpp),
+		// so the flag keeps whatever the last input Skyrim saw left in it. Two minutes after that
+		// (a load, mostly) Skyrim's camera went into auto-vanity inside every frame's update: the yaw
+		// stopped there (the frozen compass), and ForceFirstPerson only switched the camera back after
+		// the update, out of sight. (The "AutoVanity" HUD mode it pushes, which hides the compass, was
+		// popped again in the same frame, so the compass stayed up with its markers, just frozen.)
+		// Only a load (dying, mostly) resets the camera (PlayerCharacter::Revert); a door only helped when
+		// some input had reached Skyrim on the way. Now the idle timer is held at 0 while Minecraft
+		// drives, and a camera found in auto-vanity anyway leaves it the way Skyrim does on a key press.
+		struct CompassWatch
+		{
+			bool          idleLogged = false;
+			int           idleReports = 0;
+			int           stateReports = 0;
+			std::uint32_t leftFirstPerson = 0;  // frames Skyrim's camera update left first person
+			float         probeTimer = 2.0f;
+			double        probeX = 0.0;
+			float         probeHeading = 0.0f;  // the heading the strip at probeX was drawn for
+			bool          probeValid = false;
+			float         lastHeading = 0.0f;
+			bool          haveLastHeading = false;
+			float         drivenSeconds = 0.0f;  // Minecraft driving since the last load
+			bool          confirmed = false;
+			bool          frozen = false;
+			int           frozenReports = 0;
+		} compassWatch;
+
+		const char* CameraStateName(std::uint32_t a_id)
+		{
+			static constexpr const char* kNames[] = { "first person", "auto-vanity", "VATS", "free", "iron sights", "furniture", "transition", "tween",
+				"animated", "third person", "mount", "bleedout", "dragon" };
+			return a_id < std::size(kNames) ? kNames[a_id] : "unknown";
+		}
+
+		// Every frame Minecraft owns the player: to Skyrim the player has been idle since the last
+		// time its PlayerControls saw input.
+		void HoldIdleCamera()
+		{
+			auto* camera = RE::PlayerCamera::GetSingleton();
+			if (!camera) {
+				return;
+			}
+			auto& idle = camera->GetRuntimeData2().idleTimer;
+			if ((!compassWatch.idleLogged || idle > 10.0f) && compassWatch.idleReports < 10) {
+				++compassWatch.idleReports;
+				logger::info("compass: holding Skyrim's idle camera timer at 0 while Minecraft drives (it was at {:.1f} s; at fAutoVanityModeDelay, 120 s by default, Skyrim's auto-vanity camera takes over and the compass stops)",
+					idle);
+			}
+			compassWatch.idleLogged = true;
+			idle = 0.0f;
+		}
+
+		// PlayerCamera's own way out of auto-vanity (AE 50852, read from 1.7.104: only when the camera
+		// is in auto-vanity, it pops the state it came from, switches back to it and zeroes the idle
+		// timer), what any key press does in Skyrim. SE has no known ID; ForceFirstPerson follows.
+		void LeaveAutoVanity(RE::PlayerCamera* a_camera)
+		{
+			if (REL::Module::IsAE()) {
+				using LeaveFn = void (*)(RE::PlayerCamera*);
+				static const auto leave = reinterpret_cast<LeaveFn>(REL::ID(50852).address());
+				leave(a_camera);
+			}
+		}
+
+		// After Skyrim's camera update, every frame Minecraft drives (no Skyrim menu up): first person,
+		// with the compass's yaw on the player's heading.
+		void KeepCompassCamera(RE::PlayerCamera* a_camera, float a_heading)
+		{
+			if (!a_camera->IsInFirstPerson()) {
+				const auto*         state = a_camera->currentState.get();
+				const std::uint32_t id = state ? static_cast<std::uint32_t>(state->id) : 0xFFFFFFFFu;
+				++compassWatch.leftFirstPerson;
+				if (compassWatch.stateReports < 12) {
+					++compassWatch.stateReports;
+					const auto& data = a_camera->GetRuntimeData2();
+					logger::info("compass: Skyrim's camera was in its {} state (id {}) after its update, not first person (camera yaw {:.0f} deg, player heading {:.0f} deg, idle timer {:.1f} s, frames out of first person so far: {}); back to first person",
+						CameraStateName(id), id, data.yaw * kRadToDeg, a_heading * kRadToDeg, data.idleTimer, compassWatch.leftFirstPerson);
+				}
+				if (id == static_cast<std::uint32_t>(RE::CameraState::kAutoVanity)) {
+					LeaveAutoVanity(a_camera);
+				}
+				if (!a_camera->IsInFirstPerson()) {
+					a_camera->ForceFirstPerson();
+				}
+			}
+			// What Skyrim's first person state gives it (the heading, a frame late), now, so the compass
+			// also keeps up if anything else ever stops Skyrim's update from writing it.
+			if (a_camera->IsInFirstPerson()) {
+				a_camera->GetRuntimeData2().yaw = a_heading;
+			}
+		}
+
+		// Every 2 s while Minecraft drives: does the compass strip still follow the player's turns?
+		// Skyrim's HUD moves it to the camera yaw (SetCompassAngle sets DirectionRect._x); a strip
+		// that stays put while the player turned is a frozen compass. Says when it freezes and when
+		// it follows again, with what Skyrim's camera was doing.
+		void ProbeCompass(RE::UI* a_ui, RE::PlayerCamera* a_camera, float a_heading, float a_delta)
+		{
+			// The HUD updates later in the frame: the strip it shows now is for last frame's heading.
+			const float shownHeading = compassWatch.lastHeading;
+			const bool  haveShown = compassWatch.haveLastHeading;
+			compassWatch.lastHeading = a_heading;
+			compassWatch.haveLastHeading = true;
+			compassWatch.drivenSeconds += a_delta;
+			compassWatch.probeTimer -= a_delta;
+			if (compassWatch.probeTimer > 0.0f || !haveShown) {
+				return;
+			}
+			compassWatch.probeTimer = 2.0f;
+			auto hud = a_ui->GetMenu(RE::HUDMenu::MENU_NAME);
+			RE::GFxValue x;
+			if (!hud || !hud->uiMovie || !hud->uiMovie->GetVariable(&x, "_root.HUDMovieBaseInstance.CompassShoutMeterHolder.Compass.DirectionRect._x") ||
+				!x.IsNumber()) {
+				compassWatch.probeValid = false;
+				return;
+			}
+			const double stripX = x.GetNumber();
+			const float  turnedDeg = std::abs(std::remainder(shownHeading - compassWatch.probeHeading, 6.2831853f)) * kRadToDeg;
+			if (compassWatch.probeValid && turnedDeg > 20.0f) {
+				const bool still = std::abs(stripX - compassWatch.probeX) < 0.01;
+				if (still != compassWatch.frozen && compassWatch.frozenReports < 20) {
+					++compassWatch.frozenReports;
+					RE::GFxValue shown, enabled;
+					hud->uiMovie->GetVariable(&shown, "_root.HUDMovieBaseInstance.CompassShoutMeterHolder._visible");
+					hud->uiMovie->GetVariable(&enabled, "_root.HUDMovieBaseInstance.CompassShoutMeterHolder.Compass._visible");
+					const auto*         state = a_camera->currentState.get();
+					const std::uint32_t id = state ? static_cast<std::uint32_t>(state->id) : 0xFFFFFFFFu;
+					const auto&         data = a_camera->GetRuntimeData2();
+					logger::info("compass: {} (player turned {:.0f} deg in 2 s, strip at x {:.1f}; camera {} state, yaw {:.0f} deg, heading {:.0f} deg, idle timer {:.1f} s; compass shown {} enabled {}; frames Skyrim's camera left first person so far: {})",
+						still ? "FROZEN, its strip didn't move" : "following the player's turns", turnedDeg, stripX, CameraStateName(id), data.yaw * kRadToDeg,
+						a_heading * kRadToDeg, data.idleTimer, shown.IsBool() ? (shown.GetBool() ? "yes" : "no") : "?", enabled.IsBool() ? (enabled.GetBool() ? "yes" : "no") : "?",
+						compassWatch.leftFirstPerson);
+				}
+				compassWatch.frozen = still;
+				if (!still && !compassWatch.confirmed && compassWatch.drivenSeconds > 150.0f) {
+					compassWatch.confirmed = true;
+					logger::info("compass: still following the player's turns after {:.0f} s of Minecraft driving since the last load (Skyrim's idle camera froze it at 120 s before; frames Skyrim's camera left first person so far: {})",
+						compassWatch.drivenSeconds, compassWatch.leftFirstPerson);
+				}
+			}
+			compassWatch.probeX = stripX;
+			compassWatch.probeHeading = shownHeading;
+			compassWatch.probeValid = true;
+		}
+
 		// Skyrim takes the player for its own animations: sitting, crafting stations, beds, pull-bar
 		// levers and other furniture (it walks the player into place, plays the animation and uses its
 		// furniture camera), riding a horse, kill moves, and scripted scenes that drive the player.
@@ -383,6 +539,15 @@ namespace skycraft
 		// up again from wherever Skyrim leaves them.
 		const char* SkyrimTakeover(RE::PlayerCharacter* a_player)
 		{
+			// A breach door: Skyrim is moving the player into the dungeon (Minecraft's position mustn't
+			// pull them back before the interior has loaded).
+			if (Breach::Moving()) {
+				return "breaking into a dungeon";
+			}
+			// A portal trip: Skyrim is loading the player in at the partner portal.
+			if (Travel::Moving()) {
+				return "portal travel";
+			}
 			if (a_player->AsActorState()->GetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal) {
 				return "furniture";
 			}
@@ -535,7 +700,7 @@ namespace skycraft
 				link.ResetOverlay();
 				settleTimer = kSettleSeconds;
 				++epoch;
-				Collision::Get().Reset(epoch);
+				Collision::Get().Reset(epoch, worldId);
 				teleportPending = true;
 			}
 			mcWasAlive = mcAlive;
@@ -567,10 +732,36 @@ namespace skycraft
 					worldId = id;
 					Dig::SetWorld(id);
 					++epoch;
-					Collision::Get().Reset(epoch);
+					Collision::Get().Reset(epoch, id);
 					teleportPending = true;
 					settleTimer = kSettleSeconds;
 				}
+			}
+
+			// Minecraft keeps each Skyrim world's blocks in a space of its own and says which one its player
+			// is in (everything on the link is in our world's terms either way): logged for checking.
+			static std::uint32_t loggedSpace = 0;
+			if (haveMc && (mc.flags & proto::kMcInWorld) && mc.spaceWorld != 0 && mc.spaceWorld != loggedSpace) {
+				loggedSpace = mc.spaceWorld;
+				logger::info("Minecraft's player is in world {:08X}'s space (its blocks at {} {}){}", mc.spaceWorld, mc.spaceX, mc.spaceZ,
+					mc.spaceWorld == worldId ? "" : "; that isn't ours yet");
+			}
+
+			// Minecraft view (View.cpp): Minecraft's player is in another dimension (the Nether, ...) and
+			// draws its own world over the screen; Skyrim's player waits here, parked, and comes back to
+			// wherever Minecraft's comes back into the mirror.
+			const auto view = View::Update(a_player, haveMc ? &mc : nullptr, mcAlive, loading, menu, worldId, st.puppeting, a_delta);
+			if (view.change == View::Change::kBackMinecraftLeads) {
+				lastSetPos = view.handover;
+				haveLastSet = true;
+				holdMismatch = 0.0f;
+				tickHistory.clear();  // its ticks over there aren't a path to here
+				if (view.farAway) {
+					settleTimer = kSettleSeconds;  // Havok bodies stream in there first
+				}
+			} else if (view.change == View::Change::kBackSkyrimLeads) {
+				teleportPending = true;
+				tickHistory.clear();
 			}
 
 			// Skyrim moved the player itself (load door, fast travel, script, loading a save).
@@ -621,7 +812,7 @@ namespace skycraft
 				}
 			}
 			takeover = takeoverNow;
-			const bool arriving = haveMc && st.mcInWorld && !loading && mc.teleportAck != teleportSeq && !takeover;
+			const bool arriving = haveMc && st.mcInWorld && !loading && mc.teleportAck != teleportSeq && !takeover && !view.parked;
 			if (arriving) {
 				const auto   here = SkyToMc(current);
 				const double gap = std::sqrt((here.x - mc.x) * (here.x - mc.x) + (here.y - mc.y) * (here.y - mc.y) + (here.z - mc.z) * (here.z - mc.z));
@@ -636,8 +827,12 @@ namespace skycraft
 			}
 
 			// A dead Skyrim player gets Skyrim's own death camera and reload.
-			const bool puppet = haveMc && st.mcInWorld && mc.teleportAck == teleportSeq && !loading && !a_player->IsDead() && !takeover;
-			st.minecraftOwnsPlayer = puppet || (arriving && !a_player->IsDead());
+			const bool puppet = haveMc && st.mcInWorld && mc.teleportAck == teleportSeq && !loading && !a_player->IsDead() && !takeover && !view.parked;
+			// Parked for the Minecraft view: not driven, but Skyrim's controls stay off it all the same.
+			st.minecraftOwnsPlayer = puppet || ((arriving || view.parked) && !a_player->IsDead());
+			if (st.minecraftOwnsPlayer) {
+				HoldIdleCamera();  // Skyrim sees none of the player's input now (the compass, see above)
+			}
 			if (puppet != st.puppeting) {
 				logger::info("puppet {}", puppet ? "on (Minecraft drives the player)" : "off");
 			}
@@ -931,12 +1126,16 @@ namespace skycraft
 					devCount = 0;
 				}
 
-				if (!st.skyrimMenuOpen) {
+				// A right click may have just started furniture (a smelter, a chair) this frame, after the
+				// takeover check above: forcing first person now would break Skyrim's walk-in and leave the
+				// player stuck. Let Skyrim have it; the takeover is picked up next frame.
+				if (!st.skyrimMenuOpen && !SkyrimTakeover(a_player)) {
 					a_player->data.angle.z = heading;
 					a_player->data.angle.x = (st.pitch + bobPitchDeg) * kDegToRad;
 					if (auto* camera = RE::PlayerCamera::GetSingleton()) {
-						if (!camera->IsInFirstPerson()) {
-							camera->ForceFirstPerson();
+						KeepCompassCamera(camera, heading);
+						if (ui) {
+							ProbeCompass(ui, camera, heading, a_delta);
 						}
 						if (mc.fovDeg > 1.0f) {
 							ApplyMcFov(camera, mc.fovDeg);
@@ -957,6 +1156,7 @@ namespace skycraft
 				eyeValid = false;
 				idealValid = false;
 				st.feetValid = false;
+				compassWatch.probeValid = compassWatch.haveLastHeading = false;  // the compass probe starts over when Minecraft drives again
 				Dig::SetPuppet(nullptr, 0.0f);
 				HideFirstPersonMeshes(a_player, false);
 
@@ -991,16 +1191,19 @@ namespace skycraft
 			if (auto* calendar = RE::Calendar::GetSingleton()) {
 				sky.gameHour = calendar->GetHour();
 			}
+			WorldState::Place(a_player, sky.town, sky.place);
+			sky.carried = WorldState::Carried(a_player);  // an Elder Scroll, for the portal at the Time-Wound
 			link.WriteSkyState(sky);
 
 			settleTimer -= a_delta;
-			if (haveMc && !loading && cell && settleTimer <= 0.0f) {
+			// (None of Skyrim's world goes to Minecraft while it's in another dimension.)
+			if (haveMc && !loading && cell && settleTimer <= 0.0f && !view.parked) {
 				Perf::Scope timer(Perf::kCollision);
 				Collision::Get().Update(puppet ? McVec{ mc.x, mc.y, mc.z } : skyMc);
 			}
 
 			static int waterFrame = 0;
-			if (haveMc && st.mcInWorld && !loading && cell && ++waterFrame % 3 == 0) {
+			if (haveMc && st.mcInWorld && !loading && cell && !view.parked && ++waterFrame % 3 == 0) {
 				Perf::Scope timer(Perf::kWater);
 				WriteWaterGrid(a_player, puppet ? McVec{ mc.x, mc.y, mc.z } : skyMc, worldId);
 			}
@@ -1009,7 +1212,7 @@ namespace skycraft
 			const McVec lightCentre = puppet ? McVec{ mc.x, mc.y, mc.z } : skyMc;
 			{
 				Perf::Scope timer(Perf::kLights);
-				BlockLights::Update(haveMc && st.mcInWorld && !loading && cell ? &lightCentre : nullptr, a_delta);
+				BlockLights::Update(haveMc && st.mcInWorld && !loading && cell && !view.parked ? &lightCentre : nullptr, a_delta);
 			}
 
 			// Blocks dug out of Skyrim's world: its collision around them goes to Minecraft again, and
@@ -1296,6 +1499,8 @@ namespace skycraft
 			teleportPending = true;
 			haveLastSet = false;
 			State().lookInitialized = false;
+			compassWatch.drivenSeconds = 0.0f;  // a load resets Skyrim's camera and its idle timer
+			compassWatch.confirmed = false;
 		}
 	}
 }

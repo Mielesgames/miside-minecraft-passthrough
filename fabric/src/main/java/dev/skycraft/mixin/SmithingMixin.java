@@ -37,6 +37,10 @@ public abstract class SmithingMixin {
 
 	@Unique
 	private static float skycraft$worth(ItemStack stack) {
+		dev.skycraft.gear.GearTiers.Tier tier = dev.skycraft.gear.SkyGear.tier(stack.getItem());
+		if (tier != null) {
+			return tier.smithingWorth();  // Skyrim gear sets, iron to daedric
+		}
 		String path = BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath();
 		if (path.startsWith("netherite_")) {
 			return 150.0F;

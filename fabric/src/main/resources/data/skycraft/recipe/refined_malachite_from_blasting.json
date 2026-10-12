@@ -1,0 +1,11 @@
+{
+  "type": "minecraft:blasting",
+  "category": "misc",
+  "cookingtime": 100,
+  "experience": 1.0,
+  "group": "refined_malachite",
+  "ingredient": "minecraft:emerald",
+  "result": {
+    "id": "skycraft:refined_malachite"
+  }
+}

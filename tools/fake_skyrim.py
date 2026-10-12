@@ -4,6 +4,23 @@ Creates the shared mapping, streams a flat floor + a staircase of collision, hol
 bit, prints Minecraft's reported player state, and saves the overlay frame to a PNG.
 
     python tools/fake_skyrim.py [seconds] [out.png]
+
+SKYCRAFT_TOWN (default Whiterun) and SKYCRAFT_PLACE (PlaceFlags: 1 interior, 2 dungeon, 4 town;
+default 4) set where the fake player is; SKYCRAFT_PLACE=3 makes it a dungeon interior.
+SKYCRAFT_CARRIED (CarriedFlags, default 0; 1 = an Elder Scroll) sets SkyState.carried.
+SKYCRAFT_COMPANION=1 adds a wild wolf to tame with bones (Companions): see COMPANION below.
+
+Breach doors: outside (no interior place flag) it publishes two dungeon entrances near the fake
+player, a Nordic crypt 40 blocks east and a mine 60 blocks south, and prints the kEvEnterDungeon
+events Minecraft sends back (SKYCRAFT_BREACHES=0 publishes none).
+
+World spaces: the fake player is in a made-up Skyrim world (SKYCRAFT_WORLD, hex; default FF0FA4E0),
+so Minecraft gives it a space of its own and the test blocks never land in a real Skyrim world's.
+Every coordinate here is in that world's own terms, as a real Skyrim's are; kColClear names the world.
+After the first script it goes through a load door into a second made-up world (an interior), checks
+that Minecraft reports the player in that world's terms and that the cobblestone placed in the first
+world isn't drawn there, then goes back and checks it's drawn again. It prints which space Minecraft
+says each world is in (McState spaceWorld).
 """
 
 import mmap
@@ -14,7 +31,7 @@ import time
 import zlib
 
 MAGIC = 0x43594B53
-VERSION = 11
+VERSION = 13
 NAME = os.environ.get("SKYCRAFT_LINK", "Local\\SkyCraft_v1")  # fake_guest.py runs one beside a real Skyrim
 OFF_SKY = 0x100
 OFF_MC = 0x200
@@ -23,7 +40,9 @@ OFF_OVL_HDR = 0x340
 OFF_IN = 0x1000
 OFF_ACTORS = 0x12000
 OFF_EVENTS = 0x17000
+OFF_ITEMS = 0x1B100
 OFF_ENTITIES = 0x1C000
+OFF_BREACHES = 0x1FC40
 OFF_COL = 0x20000
 COL_BYTES = 32 << 20
 OFF_PIX = OFF_COL + COL_BYTES
@@ -35,7 +54,48 @@ COL_DATA = COL_BYTES - 0x80
 
 W, H = 1280, 720
 FLOOR_Y = 100  # blocks
-X0 = 100000    # test area origin (blocks); must be a multiple of 8
+X0 = 0         # test area origin (blocks, in the fake world's own terms); must be a multiple of 8
+TOWN = os.environ.get("SKYCRAFT_TOWN", "Whiterun")
+PLACE = int(os.environ.get("SKYCRAFT_PLACE", "4"), 0)
+CARRIED = int(os.environ.get("SKYCRAFT_CARRIED", "0"), 0)  # SkyState.carried: 1 = an Elder Scroll
+BREACHES = os.environ.get("SKYCRAFT_BREACHES", "1") != "0"
+# A made-up worldspace FormID (load order FF, as no plugin uses), as in SkyState.worldId: Minecraft gives
+# it a space of its own (SkySpace). 0x3C (Tamriel) puts the test blocks at the real Tamriel's origin.
+WORLD_ID = int(os.environ.get("SKYCRAFT_WORLD", "FF0FA4E0"), 16)
+WORLD_B = 0xFF0FA4E1  # a second made-up world (an interior cell) for the world-change check
+PLACE_INTERIOR = 1
+
+# McEvent types (skycraft_protocol.h)
+EV_HIT_ACTOR, EV_PLAYER_DIED, EV_EXPLOSION, EV_ARROW_STUCK, EV_SKILL_USE, EV_TAKE_ITEM, EV_SLEEP, EV_SPAWN_CREATURE, EV_ENTER_DUNGEON = range(1, 10)
+EV_PORTAL_TRAVEL = 11  # portal network: printed, not acted on (a real Skyrim moves the player)
+EV_COMPANION = 14  # companions: answered for the fake wolf (SKYCRAFT_COMPANION=1)
+COMPANION_TAME, COMPANION_FOLLOW, COMPANION_WAIT, COMPANION_HEAL = 1, 2, 3, 4
+# ActorFlags and AnimalKind (skycraft_protocol.h)
+ACTOR_HOSTILE, ACTOR_COMPANION, ACTOR_COMPANION_WAITING = 1, 1 << 5, 1 << 6
+ACTOR_KIND_SHIFT = 8
+ANIMAL_DOG, ANIMAL_WOLF, ANIMAL_HORSE = 1, 2, 3
+# Companions: SKYCRAFT_COMPANION=1 publishes a wild wolf five blocks behind the fake bandit (west of the start). Give
+# yourself bones in Minecraft (/give @s minecraft:bone 16) and right click it: Minecraft's one-in-three roll sends
+# kEvCompanion and this answers as Skyrim does (tamed, sitting; an empty hand toggles follow; meat heals it).
+COMPANION = os.environ.get("SKYCRAFT_COMPANION", "0") != "0"
+FAKE_WOLF = 0xFF00ABCE
+SRC_CONTAINER = 2
+TAG_ORE_INGOT = 1 << 3
+
+# BreachTheme / BreachFlags (skycraft_protocol.h)
+THEME_CAVE, THEME_NORDIC, THEME_DWEMER, THEME_FALMER, THEME_MINE, THEME_FORT, THEME_LAIR = range(7)
+BREACH_DISCOVERED, BREACH_CLEARED = 1, 2
+MAX_BREACHES = 16
+
+
+def fake_breaches(spawn):
+    """Two dungeon entrances near the fake player (BreachRecord fields; positions in MC coords)."""
+    x, y, z = spawn
+    return [
+        dict(door=0xFF0BEE01, location=0xFF0BEE81, pos=(x + 40.0, y, z), yaw=90.0, theme=THEME_NORDIC, flags=0, level=6, name="Fake Barrow"),
+        dict(door=0xFF0BEE02, location=0xFF0BEE82, pos=(x, y, z + 60.0), yaw=180.0, theme=THEME_MINE, flags=BREACH_DISCOVERED | BREACH_CLEARED, level=0,
+             name="Fake Mine"),
+    ]
 
 
 def tick():
@@ -51,22 +111,33 @@ class Link:
         ctypes.windll.kernel32.GetTickCount64.restype = ctypes.c_uint64
         self.m = mmap.mmap(-1, SIZE, tagname=NAME)
         self.m[0:0x100] = bytes(0x100)
-        self.m[OFF_SKY:OFF_SKY + 0x40] = bytes(0x40)
+        self.m[OFF_SKY:OFF_SKY + 0x100] = bytes(0x100)  # SkyState is 0x68 bytes
         self.m[OFF_OVL:OFF_OVL + 0x100] = bytes(0x100)
         self.m[OFF_IN:OFF_IN + 0x80] = bytes(0x80)
         self.m[OFF_COL:OFF_COL + 0x80] = bytes(0x80)
         self.m[OFF_ACTORS:OFF_ACTORS + 0x40] = bytes(0x40)
         self.m[OFF_EVENTS:OFF_EVENTS + 0x80] = bytes(0x80)
+        self.m[OFF_ITEMS:OFF_ITEMS + 0x80] = bytes(0x80)
         self.m[OFF_ENTITIES:OFF_ENTITIES + 0x40] = bytes(0x40)
+        self.m[OFF_BREACHES:OFF_BREACHES + 0x10] = bytes(0x10)
         self.m[OFF_RENDER:OFF_RENDER + 0x80] = bytes(0x80)
         struct.pack_into("<IIII", self.m, 0, MAGIC, VERSION, os.getpid(), 0)
         self.front = 2
         self.sky_seq = 0
         self.col_head = 0
         self.actor_seq = 0
+        self.breach_seq = 0
+        self.breaches = {}  # door FormID -> name, as last published
+        self.item_head = 0
+        self.game_hour = 12.0
         self.events = []
         self.sections = 0
         self.atlas = None
+        self.world = WORLD_ID
+        self.since_clear = []  # (sx, sy, sz, vertices) of every block section since the last clear-all
+        self.clears = 0
+        self.companions = {}  # FormID -> "waiting" / "following": what Minecraft tamed (SKYCRAFT_COMPANION)
+        self.wolf_health = 0.5  # the fake wolf starts hurt, so meat heals it once it's tamed
 
     def heartbeat(self):
         struct.pack_into("<Q", self.m, 0x10, tick())
@@ -77,7 +148,26 @@ class Link:
         head, tail = struct.unpack_from("<Q", self.m, OFF_EVENTS)[0], struct.unpack_from("<Q", self.m, OFF_EVENTS + 0x40)[0]
         while tail < head:
             typ, form, a, b, c, d, flags = struct.unpack_from("<IIffffI", self.m, OFF_EVENTS + 0x80 + (tail % 512) * 32)
-            print(f"  event from Minecraft: type={typ} form={form:08X} damage={a:.2f} push=({b:.2f},{c:.2f})x{d:.2f} flags={flags:#x}")
+            if typ == EV_TAKE_ITEM:
+                print(f"  event from Minecraft: take item {form:08X} x {int(a)} (converted)")
+            elif typ == EV_SLEEP:
+                self.game_hour = (self.game_hour + a) % 24.0
+                print(f"  event from Minecraft: slept {a:.1f} h, game hour now {self.game_hour:.2f}")
+            elif typ == EV_SPAWN_CREATURE:
+                print(f"  event from Minecraft: spawn creature kind {form} at ({a:.1f},{b:.1f},{c:.1f}), despawn {d:.0f} blocks, max {flags} (ignored)")
+            elif typ == EV_ENTER_DUNGEON:
+                known = self.breaches.get(form)
+                what = f"{known!r} (published)" if known else "a door that was never published (Skyrim would refuse it)"
+                print(f"  event from Minecraft: enter dungeon through door {form:08X}: {what}")
+            elif typ == EV_PORTAL_TRAVEL:
+                came_from = struct.unpack_from("<I", self.m, OFF_EVENTS + 0x80 + (tail % 512) * 32 + 28)[0]
+                kind = "interior cell" if flags & 1 else "worldspace"
+                print(f"  event from Minecraft: portal travel to {kind} {form:08X} at ({a:.2f},{b:.2f},{c:.2f}) facing {d:.0f}, sent from {came_from:08X}")
+            elif typ == EV_COMPANION:
+                kind = struct.unpack_from("<I", self.m, OFF_EVENTS + 0x80 + (tail % 512) * 32 + 28)[0]
+                self.companion_event(form, flags, a, kind)
+            else:
+                print(f"  event from Minecraft: type={typ} form={form:08X} damage={a:.2f} push=({b:.2f},{c:.2f})x{d:.2f} flags={flags:#x}")
             self.events.append(typ)
             tail += 1
         struct.pack_into("<Q", self.m, OFF_EVENTS + 0x40, tail)
@@ -100,6 +190,7 @@ class Link:
             elif typ == 2:
                 sx, sy, sz, verts = struct.unpack_from("<iiiI", self.m, base + 0x88 + pos)
                 self.sections += 1
+                self.since_clear.append((sx, sy, sz, verts))
                 if self.sections <= 5:
                     print(f"  render: section ({sx},{sy},{sz}) {verts} vertices")
                     vbase = base + 0x98 + pos
@@ -114,32 +205,101 @@ class Link:
                         print(f"    v{k}: pos ({x:.2f},{y:.2f},{z:.2f}) uv ({u:.4f},{v:.4f}) rgba ({r},{g},{b},{a}) light {light:#x} flags {flags}{texel}")
             elif typ == 3:
                 print("  render: clear all")
+                self.since_clear = []
+                self.clears += 1
             tail += (8 + n + 7) & ~7
         struct.pack_into("<Q", self.m, base + 0x40, tail)
 
-    def write_actor(self, form, x, y, z):
+    def write_actor(self, form, x, y, z, vendor=0, name="Test Bandit"):
+        """One hostile actor; vendor is its VendorBuys mask (0: not a merchant). With SKYCRAFT_COMPANION=1 the fake
+        wolf is published beside it."""
+        actors = [(form, ACTOR_HOSTILE, x, y, z, 0.6, 1.8, vendor, name)]
+        if COMPANION:
+            actors.append(self.fake_wolf(x - 5.0, y, z))
+        self.write_actors(actors)
+
+    def fake_wolf(self, x, y, z):
+        """The fake wolf (SKYCRAFT_COMPANION=1): a hostile wolf until Minecraft tames it, then the player's (companion
+        bits as Companion.cpp sets them: tamed ones wait until told to follow)."""
+        state = self.companions.get(FAKE_WOLF)
+        flags = ANIMAL_WOLF << ACTOR_KIND_SHIFT
+        if state is None:
+            flags |= ACTOR_HOSTILE
+        else:
+            flags |= ACTOR_COMPANION | (ACTOR_COMPANION_WAITING if state == "waiting" else 0)
+        return (FAKE_WOLF, flags, x, y, z, 0.7, 0.9, 0, "Wolf")
+
+    def write_actors(self, actors):
+        """The actor table: (form, flags, x, y, z, width, height, vendor, name) per actor."""
         struct.pack_into("<I", self.m, OFF_ACTORS, self.actor_seq * 2 + 1)
-        rec = struct.pack("<IIfffffffHH24s", form, 1, x, y, z, 90.0, 0.6, 1.8, 1.0, 10, 0, b"Test Bandit")
-        struct.pack_into("<I", self.m, OFF_ACTORS + 4, 1)
-        self.m[OFF_ACTORS + 0x40:OFF_ACTORS + 0x40 + 64] = rec
+        for i, (form, flags, x, y, z, width, height, vendor, name) in enumerate(actors):
+            health = self.wolf_health if form == FAKE_WOLF else 1.0
+            rec = struct.pack("<IIfffffffHH24s", form, flags, x, y, z, 90.0, width, height, health, 10, vendor, name.encode("utf-8")[:23])
+            self.m[OFF_ACTORS + 0x40 + i * 64:OFF_ACTORS + 0x40 + (i + 1) * 64] = rec
+        struct.pack_into("<I", self.m, OFF_ACTORS + 4, len(actors))
         self.actor_seq += 1
         struct.pack_into("<I", self.m, OFF_ACTORS, self.actor_seq * 2)
+
+    def companion_event(self, form, action, share, kind):
+        """kEvCompanion, answered the way Companion.cpp does for the fake wolf (anything else: refused, as Skyrim would
+        for an actor that isn't there)."""
+        names = {COMPANION_TAME: "tame", COMPANION_FOLLOW: "follow", COMPANION_WAIT: "wait", COMPANION_HEAL: "heal"}
+        print(f"  event from Minecraft: companion {names.get(action, action)} {form:08X} (kind {kind}){f', heal {share:.2f}' if action == COMPANION_HEAL else ''}")
+        if form != FAKE_WOLF:
+            print("    (not the fake wolf: Skyrim would refuse)")
+            return
+        if action == COMPANION_TAME and kind == ANIMAL_WOLF:
+            self.companions[form] = "waiting"  # a freshly tamed wolf sits
+        elif action in (COMPANION_FOLLOW, COMPANION_WAIT) and form in self.companions:
+            self.companions[form] = "following" if action == COMPANION_FOLLOW else "waiting"
+        elif action == COMPANION_HEAL and form in self.companions:
+            self.wolf_health = min(1.0, self.wolf_health + share)
+        print(f"    the fake wolf is {self.companions.get(form, 'wild')}, health {self.wolf_health:.2f}")
+
+    def write_breaches(self, records, world_id=None):
+        """Skyrim -> MC: the dungeon entrances near the player (BreachTable, seqlock: seq odd while writing)."""
+        world_id = self.world if world_id is None else world_id
+        records = records[:MAX_BREACHES]
+        self.breach_seq += 1
+        struct.pack_into("<I", self.m, OFF_BREACHES, self.breach_seq * 2 - 1)
+        struct.pack_into("<III", self.m, OFF_BREACHES + 4, len(records), world_id, 0)
+        for i, r in enumerate(records):
+            struct.pack_into("<IIffffBBH28s", self.m, OFF_BREACHES + 16 + i * 56, r["door"], r["location"], *r["pos"], r["yaw"], r["theme"], r["flags"],
+                             r["level"], r["name"].encode("utf-8")[:27])
+        struct.pack_into("<I", self.m, OFF_BREACHES, self.breach_seq * 2)
+        self.breaches = {r["door"]: r["name"] for r in records}
 
     def mc_alive(self):
         (beat,) = struct.unpack_from("<Q", self.m, 0x18)
         return beat != 0 and tick() - beat < 3000
 
-    def write_sky(self, flags, pos, yaw, pitch, teleport_seq, epoch):
+    def write_sky(self, flags, pos, yaw, pitch, teleport_seq, epoch, town=None, place=None):
         self.sky_seq += 1
         struct.pack_into("<I", self.m, OFF_SKY, self.sky_seq * 2 - 1)
-        struct.pack_into("<IIIdddffIIIf", self.m, OFF_SKY + 4, flags, 0x3C, epoch, pos[0], pos[1], pos[2],
-                         yaw, pitch, teleport_seq, W, H, 12.0)
+        struct.pack_into("<IIIdddffIIIf", self.m, OFF_SKY + 4, flags, self.world, epoch, pos[0], pos[1], pos[2],
+                         yaw, pitch, teleport_seq, W, H, self.game_hour)
+        town = TOWN if town is None else town
+        place = PLACE if place is None else place
+        struct.pack_into("<32sII", self.m, OFF_SKY + 0x40, town.encode("utf-8")[:31], place, CARRIED)  # town[32] NUL-padded, place, carried
         struct.pack_into("<I", self.m, OFF_SKY, self.sky_seq * 2)
+
+    def push_item(self, form, count, tags, name, material=0, source=SRC_CONTAINER, chest=1, container=0, quest=0):
+        """Skyrim -> MC: an item the player just got (ItemEvent). Dropped if Minecraft is a full ring behind."""
+        (tail,) = struct.unpack_from("<Q", self.m, OFF_ITEMS + 0x40)
+        if self.item_head - tail >= 64:
+            return False
+        struct.pack_into("<IiIBBBB28sI", self.m, OFF_ITEMS + 0x80 + (self.item_head % 64) * 48, form, count, tags, material, source, chest, quest,
+                         name.encode("utf-8")[:27], container)
+        self.item_head += 1
+        struct.pack_into("<Q", self.m, OFF_ITEMS, self.item_head)
+        return True
 
     def read_mc(self):
         raw = self.m[OFF_MC:OFF_MC + 0x68]
         seq, flags, x, y, z, yaw, pitch, eye, sens, ack, gui, frame, fov, bph, bam, _, ex, ey, ez = struct.unpack("<IIdddffffIIQfffIddd", raw)
-        return dict(flags=flags, pos=(x, y, z), yaw=yaw, pitch=pitch, eye=eye, ack=ack, frame=frame)
+        # McState spaceWorld, spaceX, spaceZ (@0xC8): where Minecraft keeps the blocks of the world its player is in.
+        space_world, space_x, space_z = struct.unpack_from("<Iii", self.m, OFF_MC + 0xC8)
+        return dict(flags=flags, pos=(x, y, z), yaw=yaw, pitch=pitch, eye=eye, ack=ack, frame=frame, space=(space_world, space_x, space_z))
 
     def push_input(self, typ, code, a=0, b=0, c=0):
         a, b, c = (v - (1 << 32) if v >= 1 << 31 else v for v in (a, b, c))
@@ -170,6 +330,11 @@ class Link:
         w, h, flags = struct.unpack_from("<III", self.m, OFF_OVL_HDR + self.front * 0x40)
         start = OFF_PIX + self.front * SLOT
         return w, h, flags, bytes(self.m[start:start + w * h * 4])
+
+
+def clear_payload(epoch, world):
+    """kColClear: the new epoch and the Skyrim world it describes (Minecraft puts its regions in that world's space)."""
+    return struct.pack("<II", epoch, world)
 
 
 def region_payload(rx, ry, rz, epoch, block_fn):
@@ -281,19 +446,33 @@ def main():
     saved = False
     checked = False
     tseq = int(time.time()) % 100000 + 2  # new teleport every run
+    last_breaches = 0.0
+    place, town = PLACE, TOWN
+    last_space = None
+    door = 0  # world-change check: 0 not yet, 1 in world B, 2 back in world A, 3 done
+    results = []
     while time.time() - start < seconds:
         link.heartbeat()
-        link.write_sky(1, spawn, yaw, pitch, tseq, epoch)
+        link.write_sky(1, spawn, yaw, pitch, tseq, epoch, town, place)
+        if time.time() - last_breaches >= 1.0:  # Skyrim refreshes the table about once a second; empty indoors
+            last_breaches = time.time()
+            first = not link.breaches
+            link.write_breaches(fake_breaches(spawn) if BREACHES and not place & PLACE_INTERIOR else [])
+            if first and link.breaches:
+                print("breach doors published: " + ", ".join(f"{door:08X} {name}" for door, name in link.breaches.items()))
         if link.mc_alive() and not sent:
-            link.write_col(1, struct.pack("<I", epoch))
+            link.write_col(1, clear_payload(epoch, link.world))
             for rx in range(X0 // 8 - 3, X0 // 8 + 3):
                 for rz in range(-3, 3):
                     for ry in range(11, 15):
                         link.write_col(3, floor_tris_payload(rx, ry, rz, epoch))
                         link.write_col(2, region_payload(rx, ry, rz, epoch, world))
             sent = True
-            print("collision sent")
+            print(f"collision sent (world {link.world:08X}, epoch {epoch})")
         mc = link.read_mc()
+        if mc["space"][0] and mc["space"] != last_space:
+            last_space = mc["space"]
+            print(f"Minecraft keeps world {mc['space'][0]:08X}'s blocks in its space at {mc['space'][1]} {mc['space'][2]}")
         in_world = mc["flags"] & 1 and mc["ack"] == tseq and sent and abs(mc["pos"][1] - FLOOR_Y) < 0.05 and abs(mc["pos"][0] - spawn[0]) < 1
         if in_world and script_t0 is None:
             script_t0 = time.time()
@@ -360,6 +539,40 @@ def main():
                 checked = 5
                 kinds, sel = read_world_entities(link)
                 print(f"world entities after walking over it: {kinds}")
+            # Loot: two Iron Ingots out of a chest; Minecraft's rules decide (EV_TAKE_ITEM back if converted).
+            if 19.0 <= t and checked == 5:
+                checked = 6
+                queued = link.push_item(0x0005ACE4, 2, TAG_ORE_INGOT, "Iron Ingot", container=0x000ABC01)
+                print(f"looted 2 x Iron Ingot from a chest in {TOWN!r} (place flags {PLACE:#x}): {'sent' if queued else 'item ring full'}")
+            # World spaces: through a load door into world B (same coordinates in Skyrim's terms), and back.
+            if 21.0 <= t and door == 0:
+                door = 1
+                blocks_in_a = [s for s in link.since_clear if s[3] > 0]
+                print(f"world A has {len(blocks_in_a)} block sections drawn; through a door into world {WORLD_B:08X} (an interior)")
+                link.world, place, town = WORLD_B, PLACE_INTERIOR, "Fake Interior"
+                epoch += 1
+                tseq += 1
+                sent = False
+                yaw, pitch = 0.0, 55.0
+            if 28.0 <= t and door == 1:
+                door = 2
+                there = mc["ack"] == tseq and abs(mc["pos"][0] - spawn[0]) < 1 and abs(mc["pos"][2] - spawn[2]) < 1
+                results.append(("world B: Minecraft reports the player in B's own terms", there, f"pos {mc['pos']}, space {mc['space']}"))
+                results.append(("world B: Minecraft's space is B's", mc["space"][0] == WORLD_B, f"space {mc['space']}"))
+                leaked = [s for s in link.since_clear if s[3] > 0]
+                results.append(("world B: none of world A's blocks drawn", link.clears >= 2 and not leaked, f"{len(leaked)} sections with blocks: {leaked[:4]}"))
+                print(f"back through the door into world {WORLD_ID:08X}")
+                link.world, place, town = WORLD_ID, PLACE, TOWN
+                epoch += 1
+                tseq += 1
+                sent = False
+            if 35.0 <= t and door == 2:
+                door = 3
+                back = [s for s in link.since_clear if s[3] > 0]
+                results.append(("world A again: its blocks drawn again", bool(back), f"{len(back)} sections with blocks"))
+                results.append(("world A again: Minecraft's space is A's", mc["space"][0] == WORLD_ID, f"space {mc['space']}"))
+                for what, ok, detail in results:
+                    print(f"{'PASS' if ok else 'FAIL'} {what} ({detail})")
             if 10 <= t and not saved:
                 frame = link.acquire_overlay()
                 if frame:

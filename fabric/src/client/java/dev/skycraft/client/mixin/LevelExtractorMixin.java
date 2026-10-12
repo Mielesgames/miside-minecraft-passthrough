@@ -12,6 +12,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class LevelExtractorMixin {
 	@Inject(method = "setSectionDirty(IIIZ)V", at = @At("HEAD"))
 	private void skycraft$sectionDirty(int sectionX, int sectionY, int sectionZ, boolean playerChanged, CallbackInfo ci) {
+		if (dev.skycraft.client.MinecraftView.away()) {
+			return; // another dimension's sections aren't Skyrim's (WorldExporter resends the mirror's on the way back)
+		}
 		if (playerChanged) {
 			WorldExporter.markDirtyNow(sectionX, sectionY, sectionZ);
 		} else {

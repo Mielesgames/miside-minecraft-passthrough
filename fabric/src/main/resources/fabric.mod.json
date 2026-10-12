@@ -16,6 +16,7 @@
   },
   "mixins": [
     "skycraft.mixins.json",
+    "skycraft-worlds.mixins.json",
     { "config": "skycraft.client.mixins.json", "environment": "client" }
   ],
   "depends": {

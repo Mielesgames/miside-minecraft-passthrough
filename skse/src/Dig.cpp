@@ -243,10 +243,14 @@ namespace skycraft::Dig
 			return false;
 		}
 		switch (base->GetFormType()) {
+		case RE::FormType::Door:
+			// A load door (into a dungeon, a house, a city) stays whole: digging through it got round
+			// the loading screen into the bare cave mouth modelled behind it, in the open world. From
+			// underground, a dungeon's breach antechamber is the way in.
+			return !a_ref->extraList.HasType<RE::ExtraTeleport>();
 		case RE::FormType::Tree:
 		case RE::FormType::Flora:
 		case RE::FormType::Furniture:
-		case RE::FormType::Door:
 		case RE::FormType::Container:
 		case RE::FormType::Activator:
 		case RE::FormType::MovableStatic:

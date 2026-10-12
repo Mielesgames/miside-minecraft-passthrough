@@ -38,6 +38,11 @@ class HostLink:
         _, flags, x, y, z = struct.unpack_from("<IIddd", self.m, fs.OFF_MC)
         return flags, (x, y, z)
 
+    def world(self):
+        """The Skyrim world the host's Skyrim is in (SkyState worldId): the guest claims the same, so the
+        host's Minecraft puts both in that world's space."""
+        return struct.unpack_from("<I", self.m, fs.OFF_SKY + 8)[0]
+
     def look(self):
         """The host's look direction: Minecraft yaw and pitch (degrees)."""
         return struct.unpack_from("<ff", self.m, fs.OFF_MC + 32)
@@ -98,11 +103,19 @@ def main():
             held[code] = down
             link.push_input(1, code, 1 if down else 0)
 
+    link.world = host.world()
     while time.time() - start < seconds:
         link.heartbeat()
         link.acquire_overlay()
+        if host.world() != link.world:
+            # The host went through a door: the guest follows into the same world.
+            link.world = host.world()
+            epoch += 1
+            tseq += 1
+            cleared = False
+            print(f"the host is in world {link.world:08X} now; the guest follows")
         if link.mc_alive() and not cleared:
-            link.write_col(1, struct.pack("<I", epoch))
+            link.write_col(1, fs.clear_payload(epoch, link.world))
             cleared = True
         # The host's ground, as the guest's own: same messages, the guest's epoch.
         for typ, payload in host.new_collision():

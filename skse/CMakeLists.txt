@@ -41,3 +41,15 @@ if(SKYCRAFT_DEPLOY_DIR AND EXISTS "${SKYCRAFT_DEPLOY_DIR}")
 		COMMAND ${CMAKE_COMMAND} "-DDLL=$<TARGET_FILE:SkyCraft>" "-DPDB=$<TARGET_PDB_FILE:SkyCraft>" "-DDEST=${SKYCRAFT_DEPLOY_DIR}/SKSE/Plugins" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/deploy.cmake"
 		VERBATIM)
 endif()
+
+# Pure logic tests (no game, any compiler): -DSKYCRAFT_TESTS=ON, then ctest.
+option(SKYCRAFT_TESTS "Build the pure logic tests" OFF)
+if(SKYCRAFT_TESTS)
+	enable_testing()
+	add_executable(SkyCraftStripsTest tests/StripsTest.cpp)
+	target_include_directories(SkyCraftStripsTest PRIVATE src)
+	add_test(NAME StripsTest COMMAND SkyCraftStripsTest)
+	add_executable(SkyCraftAnimalKindsTest tests/AnimalKindsTest.cpp)
+	target_include_directories(SkyCraftAnimalKindsTest PRIVATE src ${CMAKE_CURRENT_SOURCE_DIR}/../protocol)
+	add_test(NAME AnimalKindsTest COMMAND SkyCraftAnimalKindsTest)
+endif()

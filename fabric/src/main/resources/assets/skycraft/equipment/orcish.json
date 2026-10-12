@@ -1,0 +1,14 @@
+{
+  "layers": {
+    "humanoid": [
+      {
+        "texture": "skycraft:orcish"
+      }
+    ],
+    "humanoid_leggings": [
+      {
+        "texture": "skycraft:orcish"
+      }
+    ]
+  }
+}

@@ -28,6 +28,7 @@ namespace skycraft
 		constexpr std::uint32_t kFlagUntextured = 4;
 		constexpr std::uint32_t kFlagNoMip = 8;                // entity textures: always full detail, like Minecraft
 		constexpr std::uint32_t kFlagNormalFromFaces = 7u << 4;  // lit by the triangle's own normal
+		// Bit 7 (128): glows, unlit (experience orbs). Set by Minecraft's side; the shader reads it.
 		constexpr std::uint32_t kFullSkyLight = 15u << 8;
 		constexpr float         kUnits = static_cast<float>(proto::kUnitsPerBlock);
 		constexpr float         kPi = 3.14159265f;
@@ -140,6 +141,19 @@ float SceneViewDepth(float d)
 
 float Curve(float l) { return l / (4.0 - 3.0 * l); }  // Minecraft's light-level falloff
 
+// What block light (torches, lanterns, glowstone) looks like in Minecraft at a light level (0-1):
+// its lightmap's warm colour for the level, brightened by its Brightness setting at the default
+// 50% (half way to 1 - (1 - c)^4). Without that last step a torch's light fades out twice as
+// fast as Minecraft shows it: a level 7 wall (7 blocks from a torch) was 0.18 instead of 0.36.
+float3 BlockLightColor(float l)
+{
+	float  b = Curve(l);
+	float3 c = float3(b, b * ((b * 0.6 + 0.4) * 0.6 + 0.4), b * (b * b * 0.6 + 0.4));
+	float3 n = 1.0 - c;
+	n *= n;
+	return lerp(c, 1.0 - n * n, 0.5);
+}
+
 // Face normals by Minecraft Direction ordinal + 1, in Skyrim axes (x east, y north, z up).
 static const float3 kNormals[8] = {
 	float3(0, 0, 0), float3(0, 0, -1), float3(0, 0, 1), float3(0, 1, 0),
@@ -222,8 +236,7 @@ float3 Lighting(VSOut i, float3 n, bool hasNormal, float sunVisible)
 		lit += lightColor[k].rgb * ((1.0 - f * f) * l);
 	}
 	lit = renderMode.x > 0.5 ? max(lit, 0.0) : 1.0 - exp(-max(lit, 0.0) * sunDir.w);
-	float block = Curve(i.light.x);
-	return max(lit, block * float3(1.0, 0.85, 0.65));
+	return max(lit, BlockLightColor(i.light.x));
 }
 
 // Soft contact shadows under Minecraft players and mobs (their bodies are drawn after Skyrim's own
@@ -355,13 +368,19 @@ PSOut PSMain(VSOut i)
 	uint   ni = (i.flags >> 4) & 7;
 	float3 n = ni == 7 ? viewerN : kNormals[ni];  // 7: from the geometry, facing us
 	po.normal = EncodeSkyrimNormal(ni == 0 ? viewerN : n);
-	// Sun blocked by other Minecraft blocks, and by Skyrim's own geometry (its sun shadow maps).
-	// (Not Skyrim's screen-space shadow mask: that holds whatever Skyrim surface is behind the block.)
-	float sunVisible = SunShadow(i.rel, n) * SkyrimSunShadow(i.rel, n, i.viewZ);
-	float3 c = t.rgb * i.color.rgb * Lighting(i, n, ni != 0, sunVisible);
-	if (ni >= 1 && ni <= 6) {
-		// Players and mobs standing on Minecraft blocks; the block against Skyrim's ground and walls.
-		c *= BlobAO(i.rel, n) * VoxelAO(i.rel, n, false);
+	float3 c;
+	if (i.flags & 128) {
+		// Glowing (experience orbs): unlit, a little over full brightness so Skyrim's bloom catches it.
+		c = t.rgb * i.color.rgb * 1.5;
+	} else {
+		// Sun blocked by other Minecraft blocks, and by Skyrim's own geometry (its sun shadow maps).
+		// (Not Skyrim's screen-space shadow mask: that holds whatever Skyrim surface is behind the block.)
+		float sunVisible = SunShadow(i.rel, n) * SkyrimSunShadow(i.rel, n, i.viewZ);
+		c = t.rgb * i.color.rgb * Lighting(i, n, ni != 0, sunVisible);
+		if (ni >= 1 && ni <= 6) {
+			// Players and mobs standing on Minecraft blocks; the block against Skyrim's ground and walls.
+			c *= BlobAO(i.rel, n) * VoxelAO(i.rel, n, false);
+		}
 	}
 	if (fogNear.w > 0.5) {
 		float f = min(pow(saturate(length(i.rel) * fogRange.x - fogRange.y), fogRange.z), fogRange.w);

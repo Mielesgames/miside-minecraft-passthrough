@@ -94,8 +94,10 @@ namespace skycraft
 			ld.ambient = { 0.0f, 0.0f, 0.0f };
 			ld.diffuse = a_slot.color;
 			ld.radius = { a_c.radius, a_c.radius, a_c.radius };
-			// Brighter emitters shine harder, as well as further.
-			a_slot.baseFade = 0.75f + 0.65f * (float(a_c.level) / 15.0f);
+			// Brighter emitters shine harder, as well as further. Torches, lanterns and the like a
+			// little harder than lava, whose clusters already cover a lot of ground.
+			const float level = float(a_c.level) / 15.0f;
+			a_slot.baseFade = a_c.kind == proto::kLightLava ? 0.75f + 0.65f * level : 0.85f + 0.75f * level;
 			ld.fade = a_slot.baseFade;
 			light->SetLightAttenuation(a_c.radius);
 			light->local.translate = a_c.pos;
@@ -179,8 +181,12 @@ namespace skycraft
 				const float w = float(c.weight);
 				c.r /= w, c.g /= w, c.b /= w;
 				// A light level reaches that many blocks in Minecraft; a cluster of many reaches a bit further.
+				// Skyrim's point lights fade as 1 - (d / radius)^2, so the radius sits past Minecraft's
+				// reach: a torch (level 14) gets about 16 blocks, which leaves 80% of its light 7 blocks
+				// away and 60% at 10, about what a torch lights in a Minecraft tunnel (it was 12 blocks:
+				// 66% at 7, 30% at 10).
 				const float blocks = float(c.level + 1) * (1.0f + 0.12f * std::log2(float(c.count)));
-				c.radius = std::min(blocks, 20.0f) * float(proto::kUnitsPerBlock) * 0.8f;
+				c.radius = std::min(blocks * 1.05f, 21.0f) * float(proto::kUnitsPerBlock);
 				// Emitters inside a lit cell sit a little above the blocks' centre (lava lights its surface).
 				c.pos = McToSky(c.sx / c.weight, c.sy / c.weight + 0.3, c.sz / c.weight);
 				c.score = c.pos.GetDistance(playerSky) - c.radius;

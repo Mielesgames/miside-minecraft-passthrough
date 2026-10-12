@@ -34,8 +34,12 @@ namespace skycraft
 
 		// Actor table (producer, main thread): nearby actors Minecraft mirrors as hittable stand-ins.
 		void WriteActors(const proto::ActorRecord* a_records, std::uint32_t a_count);
+		// Breach table (producer, main thread): dungeon entrances near the player in worldspace a_worldId.
+		void WriteBreaches(const proto::BreachRecord* a_records, std::uint32_t a_count, std::uint32_t a_worldId);
 		// Event ring (consumer, main thread). Returns false when empty.
 		bool PopEvent(proto::McEvent& a_out);
+		// Skyrim -> MC: an item the player just got (see proto::ItemEvent). Dropped if MC is a full ring behind.
+		void PushItem(const proto::ItemEvent& a_item);
 		// World entities + block outline (seqlock read, render thread).
 		bool ReadWorldEntities(proto::WorldEntities& a_out) const;
 		// Render ring (consumer, render thread): calls a_fn(type, payload, bytes) for each pending

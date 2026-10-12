@@ -19,7 +19,7 @@ public abstract class EntitySwimMixin {
 	)
 	private FluidState skycraft$swimInSkyrimWater(Level level, BlockPos pos, Operation<FluidState> original) {
 		FluidState state = original.call(level, pos);
-		if (state.isEmpty() && SkyWater.active()) {
+		if (state.isEmpty() && SkyWater.active() && dev.skycraft.SkyDimension.inMirror(level)) {
 			FluidState water = SkyWater.fluidAt(level, pos);
 			if (water != null) {
 				return water;

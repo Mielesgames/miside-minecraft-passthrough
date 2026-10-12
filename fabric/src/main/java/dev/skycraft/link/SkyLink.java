@@ -16,6 +16,13 @@ import java.nio.charset.StandardCharsets;
 /**
  * The Minecraft end of the shared-memory link. Skyrim owns the mapping; we open it when it
  * appears and treat it as gone when Skyrim's heartbeat stops.
+ *
+ * <p>Positions cross here and only here: on the link they are in the current Skyrim world's own terms
+ * (Skyrim's position / 70), inside Minecraft in the mirror's, where each Skyrim world has a space of
+ * its own (SkySpace). What this class reads comes out moved into the space of the world Skyrim names;
+ * what it writes goes out in the terms of the world whose space it's in. The collision ring is read by
+ * SkyCollision and the render ring's section headers are made by the client's exporters; those convert
+ * the same way.
  */
 public final class SkyLink {
 	private static final int FILE_MAP_ALL_ACCESS = 0xF001F;
@@ -37,6 +44,8 @@ public final class SkyLink {
 	private static final MethodHandle QUERY_PERFORMANCE_COUNTER;
 	private static final MethodHandle QUERY_PERFORMANCE_FREQUENCY;
 	private static final MethodHandle CREATE_MUTEX;
+	private static final MethodHandle UNMAP_VIEW_OF_FILE;
+	private static final MethodHandle CLOSE_HANDLE;
 	private static MemorySegment runningMutex;
 	private static final MemorySegment QPC_OUT = Arena.global().allocate(JAVA_LONG);
 
@@ -54,6 +63,22 @@ public final class SkyLink {
 		QUERY_PERFORMANCE_COUNTER = linker.downcallHandle(k32.find("QueryPerformanceCounter").orElseThrow(), FunctionDescriptor.of(JAVA_INT, ADDRESS));
 		QUERY_PERFORMANCE_FREQUENCY = linker.downcallHandle(k32.find("QueryPerformanceFrequency").orElseThrow(), FunctionDescriptor.of(JAVA_INT, ADDRESS));
 		CREATE_MUTEX = linker.downcallHandle(k32.find("CreateMutexW").orElseThrow(), FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT, ADDRESS));
+		UNMAP_VIEW_OF_FILE = linker.downcallHandle(k32.find("UnmapViewOfFile").orElseThrow(), FunctionDescriptor.of(JAVA_INT, ADDRESS));
+		CLOSE_HANDLE = linker.downcallHandle(k32.find("CloseHandle").orElseThrow(), FunctionDescriptor.of(JAVA_INT, ADDRESS));
+	}
+
+	/** Releases a mapping that won't be used (wrong protocol, failed view). */
+	private static void closeQuietly(MemorySegment handle, MemorySegment view) {
+		try {
+			if (view.address() != 0) {
+				int ignored = (int) UNMAP_VIEW_OF_FILE.invokeExact(view);
+			}
+			if (handle.address() != 0) {
+				int ignored = (int) CLOSE_HANDLE.invokeExact(handle);
+			}
+		} catch (Throwable t) {
+			SkyCraft.LOG.warn("SkyCraft: couldn't release a shared memory mapping", t);
+		}
 	}
 
 	/**
@@ -141,6 +166,7 @@ public final class SkyLink {
 			MemorySegment view = (MemorySegment) MAP_VIEW_OF_FILE.invokeExact(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0L);
 			if (view.address() == 0) {
 				SkyCraft.LOG.error("SkyCraft: MapViewOfFile failed");
+				closeQuietly(handle, MemorySegment.NULL);
 				return;
 			}
 			MemorySegment seg = view.reinterpret(MAPPING_BYTES);
@@ -148,6 +174,7 @@ public final class SkyLink {
 			int version = seg.get(JAVA_INT, OFF_HEADER + H_VERSION);
 			if (magic != MAGIC || version != VERSION) {
 				SkyCraft.LOG.error("SkyCraft: protocol mismatch (magic {} version {}); expected version {}", Integer.toHexString(magic), version, VERSION);
+				closeQuietly(handle, view); // retried every second: don't leak a 195 MB view and a handle each time
 				return;
 			}
 			seg.set(JAVA_INT, OFF_HEADER + H_MC_PID, (int) GET_CURRENT_PROCESS_ID.invokeExact());
@@ -191,17 +218,26 @@ public final class SkyLink {
 
 	// ---- SkyState (read) -------------------------------------------------------------------
 
-	/** Plain snapshot of SkyState. */
+	/**
+	 * Plain snapshot of SkyState. Its position is in the mirror's terms: Skyrim's, moved into the space of
+	 * the world it names (SkySpace).
+	 */
 	public static final class SkyState {
 		public int seq;
 		public int flags;
 		public int worldId;
+		/** worldId's space (WorldSpaces), or -1 while a guest waits to hear it from the host. */
+		public int space;
 		public int collisionEpoch;
 		public double x, y, z;
 		public float yaw, pitch;
 		public int teleportSeq;
 		public int viewportW, viewportH;
 		public float gameHour;
+		public String town = "";
+		public int place;
+		/** Proto.CARRY_* bits: quest items the Skyrim player carries (0 from a plugin that predates the field). */
+		public int carried;
 
 		public boolean inGame() {
 			return (this.flags & SKY_IN_GAME) != 0;
@@ -216,8 +252,7 @@ public final class SkyLink {
 		}
 	}
 
-	/** Seqlock read of SkyState into {@code out}. Returns false if the link is down. */
-	/** Skyrim's water surface around the player (see WaterGrid in the protocol). */
+	/** Skyrim's water surface around the player (see WaterGrid in the protocol), its origin in the mirror's terms. */
 	public static final class WaterGrid {
 		public int originX, originZ, worldId;
 		public final int size = WATER_GRID_SIZE;
@@ -249,12 +284,19 @@ public final class SkyLink {
 			}
 			VarHandle.loadLoadFence();
 			if ((int) INT.getAcquire(s, b + WG_SEQ) == seq1) {
+				int space = SkySpace.space(out.worldId, null);
+				out.originX += WorldSpaces.originX(space);
+				out.originZ += WorldSpaces.originZ(space);
 				return out;
 			}
 		}
 		return null;
 	}
 
+	/**
+	 * Seqlock read of SkyState into {@code out}. Returns false if the link is down or Skyrim kept
+	 * writing; {@code out} is then left as it was (never half updated).
+	 */
 	public static boolean readSkyState(SkyState out) {
 		MemorySegment s = shm;
 		if (s == null) {
@@ -271,22 +313,42 @@ public final class SkyLink {
 				}
 				continue;
 			}
-			out.flags = s.get(JAVA_INT, b + SS_FLAGS);
-			out.worldId = s.get(JAVA_INT, b + SS_WORLD_ID);
-			out.collisionEpoch = s.get(JAVA_INT, b + SS_COLLISION_EPOCH);
-			out.x = s.get(JAVA_DOUBLE, b + SS_POS_X);
-			out.y = s.get(JAVA_DOUBLE, b + SS_POS_Y);
-			out.z = s.get(JAVA_DOUBLE, b + SS_POS_Z);
-			out.yaw = s.get(JAVA_FLOAT, b + SS_YAW);
-			out.pitch = s.get(JAVA_FLOAT, b + SS_PITCH);
-			out.teleportSeq = s.get(JAVA_INT, b + SS_TELEPORT_SEQ);
-			out.viewportW = s.get(JAVA_INT, b + SS_VIEWPORT_W);
-			out.viewportH = s.get(JAVA_INT, b + SS_VIEWPORT_H);
-			out.gameHour = s.get(JAVA_FLOAT, b + SS_GAME_HOUR);
+			int flags = s.get(JAVA_INT, b + SS_FLAGS);
+			int worldId = s.get(JAVA_INT, b + SS_WORLD_ID);
+			int collisionEpoch = s.get(JAVA_INT, b + SS_COLLISION_EPOCH);
+			double x = s.get(JAVA_DOUBLE, b + SS_POS_X);
+			double y = s.get(JAVA_DOUBLE, b + SS_POS_Y);
+			double z = s.get(JAVA_DOUBLE, b + SS_POS_Z);
+			float yaw = s.get(JAVA_FLOAT, b + SS_YAW);
+			float pitch = s.get(JAVA_FLOAT, b + SS_PITCH);
+			int teleportSeq = s.get(JAVA_INT, b + SS_TELEPORT_SEQ);
+			int viewportW = s.get(JAVA_INT, b + SS_VIEWPORT_W);
+			int viewportH = s.get(JAVA_INT, b + SS_VIEWPORT_H);
+			float gameHour = s.get(JAVA_FLOAT, b + SS_GAME_HOUR);
+			String town = readName(s, b + SS_TOWN, 32, out.town);
+			int place = s.get(JAVA_INT, b + SS_PLACE);
+			int carried = s.get(JAVA_INT, b + SS_CARRIED);
 			VarHandle.loadLoadFence();
 			int seq2 = (int) INT.getAcquire(s, b + SS_SEQ);
 			if (seq1 == seq2) {
+				int space = SkySpace.space(worldId, town);
 				out.seq = seq1;
+				out.flags = flags;
+				out.worldId = worldId;
+				out.space = space;
+				out.collisionEpoch = collisionEpoch;
+				out.x = x + WorldSpaces.originX(space);
+				out.y = y;
+				out.z = z + WorldSpaces.originZ(space);
+				out.yaw = yaw;
+				out.pitch = pitch;
+				out.teleportSeq = teleportSeq;
+				out.viewportW = viewportW;
+				out.viewportH = viewportH;
+				out.gameHour = gameHour;
+				out.town = town;
+				out.place = place;
+				out.carried = carried;
 				return true;
 			}
 		}
@@ -301,7 +363,14 @@ public final class SkyLink {
 
 	// ---- McState (write) -------------------------------------------------------------------
 
+	/**
+	 * What Minecraft tells Skyrim each frame. Positions are the mirror's (where the player really is):
+	 * {@link #writeMcState} puts them in the terms of the Skyrim world whose space they're in, unless
+	 * {@link #inMirror} is off (another dimension's are sent as they are).
+	 */
 	public static final class McState {
+		/** The player is in the Skyrim mirror (not the Nether, Tamriel Wilds, ...). Not sent. */
+		public boolean inMirror = true;
 		public int flags;
 		public double x, y, z;
 		public float yaw, pitch;
@@ -331,13 +400,19 @@ public final class SkyLink {
 			return;
 		}
 		long b = OFF_MC_STATE;
+		// Skyrim gets the player in its own world's terms: whichever space the player is in (its world is
+		// Skyrim's current one, except for the moment of a world change, when Skyrim waits for its
+		// teleport to be acknowledged anyway).
+		boolean mirror = st.inMirror;
+		int space = mirror ? SkySpace.spaceAt(st.x, st.z) : 0;
+		int spaceWorld = mirror ? SkySpace.worldAt(st.x, st.z) : 0;
 		int seq = s.get(JAVA_INT, b + MS_SEQ);
 		INT.setRelease(s, b + MS_SEQ, seq + 1);
 		VarHandle.storeStoreFence();
 		s.set(JAVA_INT, b + MS_FLAGS, st.flags);
-		s.set(JAVA_DOUBLE, b + MS_X, st.x);
+		s.set(JAVA_DOUBLE, b + MS_X, mirror ? SkySpace.local(st.x) : st.x);
 		s.set(JAVA_DOUBLE, b + MS_Y, st.y);
-		s.set(JAVA_DOUBLE, b + MS_Z, st.z);
+		s.set(JAVA_DOUBLE, b + MS_Z, mirror ? SkySpace.local(st.z) : st.z);
 		s.set(JAVA_FLOAT, b + MS_YAW, st.yaw);
 		s.set(JAVA_FLOAT, b + MS_PITCH, st.pitch);
 		s.set(JAVA_FLOAT, b + MS_EYE_HEIGHT, st.eyeHeight);
@@ -348,16 +423,16 @@ public final class SkyLink {
 		s.set(JAVA_FLOAT, b + MS_FOV, st.fov);
 		s.set(JAVA_FLOAT, b + MS_BOB_PHASE, st.bobPhase);
 		s.set(JAVA_FLOAT, b + MS_BOB_AMOUNT, st.bobAmount);
-		s.set(JAVA_DOUBLE, b + MS_EYE_X, st.eyeX);
+		s.set(JAVA_DOUBLE, b + MS_EYE_X, mirror ? SkySpace.local(st.eyeX) : st.eyeX);
 		s.set(JAVA_DOUBLE, b + MS_EYE_Y, st.eyeY);
-		s.set(JAVA_DOUBLE, b + MS_EYE_Z, st.eyeZ);
+		s.set(JAVA_DOUBLE, b + MS_EYE_Z, mirror ? SkySpace.local(st.eyeZ) : st.eyeZ);
 		s.set(JAVA_LONG, b + MS_TICK_QPC, st.tickQpc);
-		s.set(JAVA_DOUBLE, b + MS_PREV_X, st.prevX);
+		s.set(JAVA_DOUBLE, b + MS_PREV_X, mirror ? SkySpace.local(st.prevX) : st.prevX);
 		s.set(JAVA_DOUBLE, b + MS_PREV_X + 8, st.prevY);
-		s.set(JAVA_DOUBLE, b + MS_PREV_X + 16, st.prevZ);
-		s.set(JAVA_DOUBLE, b + MS_CUR_X, st.curX);
+		s.set(JAVA_DOUBLE, b + MS_PREV_X + 16, mirror ? SkySpace.local(st.prevZ) : st.prevZ);
+		s.set(JAVA_DOUBLE, b + MS_CUR_X, mirror ? SkySpace.local(st.curX) : st.curX);
 		s.set(JAVA_DOUBLE, b + MS_CUR_X + 8, st.curY);
-		s.set(JAVA_DOUBLE, b + MS_CUR_X + 16, st.curZ);
+		s.set(JAVA_DOUBLE, b + MS_CUR_X + 16, mirror ? SkySpace.local(st.curZ) : st.curZ);
 		s.set(JAVA_FLOAT, b + MS_EYE_HEIGHT_O, st.eyeHeightO);
 		s.set(JAVA_FLOAT, b + MS_EYE_HEIGHT_T, st.eyeHeightT);
 		s.set(JAVA_FLOAT, b + MS_WALK_O, st.walkDistO);
@@ -367,6 +442,9 @@ public final class SkyLink {
 		s.set(JAVA_FLOAT, b + MS_TICK_MS, st.tickMs);
 		s.set(JAVA_INT, b + MS_CAMERA_MODE, st.cameraMode);
 		s.set(JAVA_FLOAT, b + MS_CAMERA_DISTANCE, st.cameraDistance);
+		s.set(JAVA_INT, b + MS_SPACE_WORLD, spaceWorld);
+		s.set(JAVA_INT, b + MS_SPACE_X, mirror ? WorldSpaces.originX(space) : 0);
+		s.set(JAVA_INT, b + MS_SPACE_Z, mirror ? WorldSpaces.originZ(space) : 0);
 		INT.setRelease(s, b + MS_SEQ, seq + 2);
 	}
 
@@ -403,8 +481,9 @@ public final class SkyLink {
 
 	// ---- actor table (read) ----------------------------------------------------------------
 
-	/** One nearby Skyrim actor (see ActorRecord in the protocol header). */
-	public record Actor(int formId, int flags, float x, float y, float z, float yaw, float width, float height, float healthFrac, int level, String name) {
+	/** One nearby Skyrim actor (see ActorRecord in the protocol header), its feet in the mirror's terms. */
+	public record Actor(int formId, int flags, double x, double y, double z, float yaw, float width, float height, float healthFrac, int level, int vendor,
+		String name) {
 		public boolean dead() {
 			return (this.flags & ACTOR_DEAD) != 0;
 		}
@@ -414,29 +493,46 @@ public final class SkyLink {
 		}
 	}
 
-	/** Seqlock read of the actor table. Returns false (leaving {@code out} empty) on a torn read. */
+	/**
+	 * Seqlock read of the actor table into {@code out}, replacing what it held. Returns false (leaving
+	 * {@code out} empty) on a torn read. Names are reused from the previous read where unchanged.
+	 */
 	public static boolean readActors(java.util.List<Actor> out) {
-		out.clear();
 		MemorySegment s = shm;
 		if (s == null) {
+			out.clear();
 			return false;
 		}
 		long b = OFF_ACTOR_TABLE;
+		// The actors are around Skyrim's player, in the world SkyState names (a world change is a frame
+		// apart at most, like the table itself).
+		int space = SkySpace.space((int) INT.getAcquire(s, OFF_SKY_STATE + SS_WORLD_ID), null);
+		double ox = WorldSpaces.originX(space), oz = WorldSpaces.originZ(space);
 		for (int attempt = 0; attempt < 16; attempt++) {
 			int seq1 = (int) INT.getAcquire(s, b + AT_SEQ);
 			if ((seq1 & 1) != 0) {
 				Thread.onSpinWait();
 				continue;
 			}
-			int count = Math.min(s.get(JAVA_INT, b + AT_COUNT), MAX_ACTORS);
+			int count = Math.max(0, Math.min(s.get(JAVA_INT, b + AT_COUNT), MAX_ACTORS));
+			int had = out.size(); // last read's actors; Skyrim keeps their order from frame to frame
 			for (int i = 0; i < count; i++) {
 				long r = b + AT_RECORDS + i * ACTOR_RECORD_BYTES;
-				out.add(new Actor(
+				Actor a = new Actor(
 					s.get(JAVA_INT, r), s.get(JAVA_INT, r + 4),
-					s.get(JAVA_FLOAT, r + 8), s.get(JAVA_FLOAT, r + 12), s.get(JAVA_FLOAT, r + 16),
+					s.get(JAVA_FLOAT, r + 8) + ox, s.get(JAVA_FLOAT, r + 12), s.get(JAVA_FLOAT, r + 16) + oz,
 					s.get(JAVA_FLOAT, r + 20), s.get(JAVA_FLOAT, r + 24), s.get(JAVA_FLOAT, r + 28),
-					s.get(JAVA_FLOAT, r + 32), Short.toUnsignedInt(s.get(JAVA_SHORT, r + 36)), readName(s, r + 40, 24)
-				));
+					s.get(JAVA_FLOAT, r + 32), Short.toUnsignedInt(s.get(JAVA_SHORT, r + 36)),
+					Short.toUnsignedInt(s.get(JAVA_SHORT, r + 38)), readName(s, r + 40, 24, i < had ? out.get(i).name() : null)
+				);
+				if (i < had) {
+					out.set(i, a);
+				} else {
+					out.add(a);
+				}
+			}
+			if (had > count) {
+				out.subList(count, had).clear();
 			}
 			VarHandle.loadLoadFence();
 			if ((int) INT.getAcquire(s, b + AT_SEQ) == seq1) {
@@ -444,6 +540,7 @@ public final class SkyLink {
 			}
 			out.clear();
 		}
+		out.clear();
 		return false;
 	}
 
@@ -460,6 +557,105 @@ public final class SkyLink {
 		return new String(bytes, 0, n, StandardCharsets.UTF_8);
 	}
 
+	/** Like {@link #readName(MemorySegment, long, int)}, but returns {@code prev} (no allocation) while the bytes still spell it. */
+	private static String readName(MemorySegment s, long off, int max, String prev) {
+		int n = prev != null ? prev.length() : max + 1;
+		if (n <= max) {
+			int i = 0;
+			while (i < n && s.get(JAVA_BYTE, off + i) == prev.charAt(i)) {
+				i++; // a non-ASCII byte is negative and never equals a char, so such names are decoded
+			}
+			if (i == n && (n == max || s.get(JAVA_BYTE, off + n) == 0)) {
+				return prev;
+			}
+		}
+		return readName(s, off, max);
+	}
+
+	// ---- breach table (read) ---------------------------------------------------------------
+
+	/** A dungeon entrance near the player (see BreachRecord in the protocol header), its door in the mirror's terms. */
+	public record Breach(int doorRef, int location, double x, double y, double z, float yaw, int theme, int flags, int level, String name) {
+		public boolean discovered() {
+			return (this.flags & BREACH_DISCOVERED) != 0;
+		}
+
+		public boolean cleared() {
+			return (this.flags & BREACH_CLEARED) != 0;
+		}
+	}
+
+	/**
+	 * Seqlock read of the breach table into {@code out}. Returns the worldspace FormID the entries belong
+	 * to, or -1 (leaving {@code out} empty) when unlinked or on a torn read.
+	 */
+	public static int readBreaches(java.util.List<Breach> out) {
+		out.clear();
+		MemorySegment s = shm;
+		if (s == null) {
+			return -1;
+		}
+		long b = OFF_BREACH_TABLE;
+		for (int attempt = 0; attempt < 16; attempt++) {
+			int seq1 = (int) INT.getAcquire(s, b + BT_SEQ);
+			if ((seq1 & 1) != 0) {
+				Thread.onSpinWait();
+				continue;
+			}
+			int count = Math.max(0, Math.min(s.get(JAVA_INT, b + BT_COUNT), MAX_BREACHES));
+			int worldId = s.get(JAVA_INT, b + BT_WORLD_ID);
+			int space = SkySpace.space(worldId, null);
+			double ox = WorldSpaces.originX(space), oz = WorldSpaces.originZ(space);
+			for (int i = 0; i < count; i++) {
+				long r = b + BT_RECORDS + i * BREACH_RECORD_BYTES;
+				out.add(new Breach(
+					s.get(JAVA_INT, r + BR_DOOR_REF), s.get(JAVA_INT, r + BR_LOCATION),
+					s.get(JAVA_FLOAT, r + BR_X) + ox, s.get(JAVA_FLOAT, r + BR_Y), s.get(JAVA_FLOAT, r + BR_Z) + oz, s.get(JAVA_FLOAT, r + BR_YAW),
+					Byte.toUnsignedInt(s.get(JAVA_BYTE, r + BR_THEME)), Byte.toUnsignedInt(s.get(JAVA_BYTE, r + BR_FLAGS)),
+					Short.toUnsignedInt(s.get(JAVA_SHORT, r + BR_LEVEL)), readName(s, r + BR_NAME, BR_NAME_BYTES)
+				));
+			}
+			VarHandle.loadLoadFence();
+			if ((int) INT.getAcquire(s, b + BT_SEQ) == seq1) {
+				return worldId;
+			}
+			out.clear();
+		}
+		return -1;
+	}
+
+	// ---- item ring (consume) ---------------------------------------------------------------
+
+	/** An item that landed in the Skyrim player's inventory (see ItemEvent in the protocol header). */
+	public record Item(int formId, int count, int tags, int material, int source, String name, int container, boolean chest, boolean quest) {
+	}
+
+	/**
+	 * Takes every queued item event off the ring, oldest first. Each item leaves the ring before
+	 * {@code sink} sees it, so an exception in {@code sink} can't hand the same item over twice.
+	 */
+	public static void drainItems(java.util.function.Consumer<Item> sink) {
+		MemorySegment s = shm;
+		if (s == null) {
+			return;
+		}
+		long base = OFF_ITEM_RING;
+		long head = (long) LONG.getAcquire(s, base + ITR_HEAD);
+		long tail = s.get(JAVA_LONG, base + ITR_TAIL);
+		if (head - tail > ITEM_RING_ENTRIES) {
+			tail = head - ITEM_RING_ENTRIES;
+		}
+		while (tail < head) {
+			long e = base + ITR_DATA + (tail & (ITEM_RING_ENTRIES - 1)) * ITEM_BYTES;
+			Item item = new Item(s.get(JAVA_INT, e), s.get(JAVA_INT, e + 4), s.get(JAVA_INT, e + 8), Byte.toUnsignedInt(s.get(JAVA_BYTE, e + 12)),
+				Byte.toUnsignedInt(s.get(JAVA_BYTE, e + 13)), readName(s, e + 16, 28), s.get(JAVA_INT, e + 44),
+				s.get(JAVA_BYTE, e + 14) != 0, s.get(JAVA_BYTE, e + 15) != 0);
+			tail++;
+			LONG.setRelease(s, base + ITR_TAIL, tail);
+			sink.accept(item);
+		}
+	}
+
 	// ---- event ring (produce) --------------------------------------------------------------
 
 	/** Queues an event for Skyrim. Safe from any thread. Drops the event if Skyrim is a full ring behind. */
@@ -467,10 +663,41 @@ public final class SkyLink {
 		pushEvent(type, formId, a, b, c, d, flags, 0);
 	}
 
+	/**
+	 * Queues an event that happens at a place in the mirror ({@code x, y, z}, sent as a, b, c in the terms
+	 * of the Skyrim world whose space it's in). A place outside the space of the world Skyrim is in now
+	 * (a chunk of the world just left) is dropped: Skyrim would put it in the wrong world. Only a portal
+	 * trip (EV_PORTAL_TRAVEL) names a place in another world on purpose.
+	 */
+	public static void pushEventAt(int type, int formId, double x, double y, double z, float d, int flags, int weapon) {
+		MemorySegment s = shm;
+		if (s == null) {
+			return;
+		}
+		if (type != EV_PORTAL_TRAVEL && !SkySpace.inWorld((int) INT.getAcquire(s, OFF_SKY_STATE + SS_WORLD_ID), x, z)) {
+			return;
+		}
+		pushEvent(type, formId, (float) SkySpace.local(x), (float) y, (float) SkySpace.local(z), d, flags, weapon);
+	}
+
+	/** Event types whose a, b, c are a place (Minecraft coordinates) rather than amounts. */
+	private static boolean carriesPlace(int type) {
+		return type == EV_EXPLOSION || type == EV_ARROW_STUCK || type == EV_SPAWN_CREATURE || type == EV_PORTAL_TRAVEL;
+	}
+
+	/**
+	 * Queues an event for Skyrim. A place in a, b, c goes in the terms of the Skyrim world whose space it's
+	 * in, whoever calls this (a place already in those terms stays as it is); {@link #pushEventAt} keeps
+	 * full precision and drops places outside Skyrim's current world.
+	 */
 	public static synchronized void pushEvent(int type, int formId, float a, float b, float c, float d, int flags, int weapon) {
 		MemorySegment s = shm;
 		if (s == null) {
 			return;
+		}
+		if (carriesPlace(type)) {
+			a = (float) SkySpace.local(a);
+			c = (float) SkySpace.local(c);
 		}
 		long base = OFF_EVENT_RING;
 		long head = s.get(JAVA_LONG, base + ER_HEAD);
@@ -493,14 +720,18 @@ public final class SkyLink {
 	// ---- world entities (write) ------------------------------------------------------------
 
 	/**
-	 * One Minecraft thing for Skyrim to draw (see WorldEntity in the protocol header). {@code uv}
-	 * holds up to three atlas rects {u0, v0, u1, v1}: sprite/side, top, bottom.
+	 * One Minecraft thing for Skyrim to draw (see WorldEntity in the protocol header), at a place in the
+	 * mirror (sent in its Skyrim world's terms). {@code uv} holds up to three atlas rects
+	 * {u0, v0, u1, v1}: sprite/side, top, bottom.
 	 */
-	public record WorldEntity(int kind, int id, float x, float y, float z, float yaw, float pitch, float scale, float[] ext, float[] uv, int tint) {
+	public record WorldEntity(int kind, int id, double x, double y, double z, float yaw, float pitch, float scale, float[] ext, float[] uv, int tint) {
 	}
 
-	/** Seqlock write of the world-entity table and block selection. Render thread only. */
-	public static void writeWorldEntities(java.util.List<WorldEntity> entities, float[] selection) {
+	/**
+	 * Seqlock write of the world-entity table and block selection ({minX, minY, minZ, maxX, maxY, maxZ}
+	 * in the mirror, or null). Render thread only.
+	 */
+	public static void writeWorldEntities(java.util.List<WorldEntity> entities, double @org.jspecify.annotations.Nullable [] selection) {
 		MemorySegment s = shm;
 		if (s == null) {
 			return;
@@ -513,8 +744,11 @@ public final class SkyLink {
 		s.set(JAVA_INT, b + WE_COUNT, count);
 		s.set(JAVA_INT, b + WE_HAS_SELECTION, selection != null ? 1 : 0);
 		if (selection != null) {
+			// Both corners in the min corner's space (a box never straddles two).
+			double ox = selection[0] - SkySpace.local(selection[0]), oz = selection[2] - SkySpace.local(selection[2]);
 			for (int i = 0; i < 6; i++) {
-				s.set(JAVA_FLOAT, b + WE_SEL_MIN + i * 4L, selection[i]);
+				double v = i % 3 == 0 ? selection[i] - ox : i % 3 == 2 ? selection[i] - oz : selection[i];
+				s.set(JAVA_FLOAT, b + WE_SEL_MIN + i * 4L, (float) v);
 			}
 		}
 		for (int i = 0; i < count; i++) {
@@ -522,9 +756,9 @@ public final class SkyLink {
 			long r = b + WE_RECORDS + i * WORLD_ENTITY_BYTES;
 			s.set(JAVA_INT, r, w.kind());
 			s.set(JAVA_INT, r + 4, w.id());
-			s.set(JAVA_FLOAT, r + 8, w.x());
-			s.set(JAVA_FLOAT, r + 12, w.y());
-			s.set(JAVA_FLOAT, r + 16, w.z());
+			s.set(JAVA_FLOAT, r + 8, (float) SkySpace.local(w.x()));
+			s.set(JAVA_FLOAT, r + 12, (float) w.y());
+			s.set(JAVA_FLOAT, r + 16, (float) SkySpace.local(w.z()));
 			s.set(JAVA_FLOAT, r + 20, w.yaw());
 			s.set(JAVA_FLOAT, r + 24, w.pitch());
 			s.set(JAVA_FLOAT, r + 28, w.scale());
@@ -612,6 +846,11 @@ public final class SkyLink {
 
 	/** Publishes the frame just written into the back slot. */
 	public static void publishOverlay(int width, int height, boolean bottomUp, long frameId) {
+		publishOverlay(width, height, bottomUp ? OVERLAY_BOTTOM_UP : 0, frameId);
+	}
+
+	/** Publishes the frame just written into the back slot, with its OVERLAY_* flags. */
+	public static void publishOverlay(int width, int height, int flags, long frameId) {
 		MemorySegment s = shm;
 		if (s == null) {
 			return;
@@ -619,7 +858,7 @@ public final class SkyLink {
 		long hdr = OFF_OVERLAY_SLOT_HDR + overlayBack * SLOT_HDR_SIZE;
 		s.set(JAVA_INT, hdr + SH_WIDTH, width);
 		s.set(JAVA_INT, hdr + SH_HEIGHT, height);
-		s.set(JAVA_INT, hdr + SH_FLAGS, bottomUp ? 1 : 0);
+		s.set(JAVA_INT, hdr + SH_FLAGS, flags);
 		s.set(JAVA_LONG, hdr + SH_FRAME_ID, frameId);
 		int old = (int) INT.getAndSet(s, OFF_OVERLAY_CTL + OC_STATE, overlayBack | OVERLAY_DIRTY);
 		overlayBack = old & 3;

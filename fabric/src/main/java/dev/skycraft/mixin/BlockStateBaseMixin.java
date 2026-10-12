@@ -23,7 +23,7 @@ public abstract class BlockStateBaseMixin {
 		cancellable = true
 	)
 	private void skycraft$skyrimIsSturdy(BlockGetter level, BlockPos pos, Direction direction, SupportType type, CallbackInfoReturnable<Boolean> cir) {
-		if (!((BlockBehaviour.BlockStateBase) (Object) this).isAir()) {
+		if (!((BlockBehaviour.BlockStateBase) (Object) this).isAir() || !dev.skycraft.SkyDimension.inMirror(level)) {
 			return;
 		}
 		boolean sturdy = direction == Direction.UP ? SkyCollision.supportsFromBelow(pos.above()) : SkyCollision.solidFraction(pos) >= 0.4F;

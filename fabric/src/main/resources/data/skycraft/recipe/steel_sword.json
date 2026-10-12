@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "equipment",
+  "key": {
+    "M": "skycraft:steel_ingot",
+    "L": "skycraft:leather_strips"
+  },
+  "pattern": [
+    "M",
+    "M",
+    "L"
+  ],
+  "result": {
+    "id": "skycraft:steel_sword"
+  }
+}

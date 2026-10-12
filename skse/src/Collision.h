@@ -15,8 +15,10 @@ namespace skycraft
 		static Collision& Get();
 
 		void Start();
-		// Drops everything; Minecraft clears its store when it sees the new epoch.
-		void Reset(std::uint32_t a_epoch);
+		// Drops everything; Minecraft clears its store when it sees the new epoch. a_worldId: the Skyrim
+		// world (SkyState::worldId) the epoch describes, sent with kColClear so Minecraft puts its regions
+		// in that world's space.
+		void Reset(std::uint32_t a_epoch, std::uint32_t a_worldId);
 		// Called once per frame with the player's position in MC coordinates.
 		void Update(const McVec& a_playerMc);
 
@@ -65,6 +67,7 @@ namespace skycraft
 		{
 			int                  rx, ry, rz;
 			std::uint32_t        epoch;
+			std::uint32_t        worldId{ 0 };  // clear jobs: the world the new epoch describes
 			bool                 clear{ false };
 			std::vector<Tri>     tris;
 			std::vector<Obb>     boxes;
@@ -78,6 +81,7 @@ namespace skycraft
 			bool                 diggable{ false };
 			bool                 terrain{ false };
 			bool                 tree{ false };
+			std::uint32_t        turned{ 0 };  // strip triangles turned back to face out (see Collect)
 		};
 		struct Body
 		{
@@ -93,7 +97,9 @@ namespace skycraft
 
 		void GatherBodies(RE::hkpWorld* a_world);
 		void Harvest(int a_rx, int a_ry, int a_rz);
-		void Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth, RE::hkpShapeKey a_key);
+		// a_turned: a triangle of Skyrim's strip collision that comes turned round (swapped back).
+		void Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth, RE::hkpShapeKey a_key,
+			bool a_turned = false);
 		void EmitAabbFallback(const RE::hkpShape* a_shape, const float* a_xf, Job& a_job, RE::hkpShapeKey a_key);
 		std::uint32_t FlagsFor(const Job& a_job, RE::hkpShapeKey a_key) const;
 

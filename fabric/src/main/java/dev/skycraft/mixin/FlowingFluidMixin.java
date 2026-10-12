@@ -36,7 +36,7 @@ public abstract class FlowingFluidMixin {
 		Direction direction, BlockGetter level, BlockPos sourcePos, BlockState sourceState, BlockPos targetPos, BlockState targetState,
 		CallbackInfoReturnable<Boolean> cir
 	) {
-		if (!targetState.isAir() || !SkyCollision.active() || direction == Direction.UP) {
+		if (!targetState.isAir() || !SkyCollision.active() || direction == Direction.UP || !dev.skycraft.SkyDimension.inMirror(level)) {
 			return;
 		}
 		if (!SkyCollision.isKnown(targetPos.getX(), targetPos.getY(), targetPos.getZ())) {

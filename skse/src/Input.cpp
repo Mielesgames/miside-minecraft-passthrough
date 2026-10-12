@@ -51,23 +51,39 @@ namespace skycraft
 		float lookDx = 0.0f;
 		float lookDy = 0.0f;
 
-		// G on something Skyrim can activate (door, NPC, container, item, furniture) activates it in
-		// Skyrim. Furniture (chairs, beds, crafting stations, pull-bar levers) hands the player to
-		// Skyrim while it's used (Game.cpp, SkyrimTakeover).
-		void ActivateSkyrimTarget()
+		// What asked Skyrim to activate its crosshair target.
+		enum class ActivateBy
+		{
+			kG,      // the G key
+			kClick,  // a right click Minecraft had no use for (proto::kEvActivate)
+		};
+
+		// A right click activates at most once per this many seconds of unpaused play.
+		constexpr float kClickActivateInterval = 0.4f;
+		float           clickCooldown = 0.0f;
+
+		// G (or a right click Minecraft had no use for) on something Skyrim can activate (door, NPC,
+		// container, item, furniture) activates it in Skyrim. Furniture (chairs, beds, crafting
+		// stations, pull-bar levers) hands the player to Skyrim while it's used (Game.cpp,
+		// SkyrimTakeover). The crosshair is read now, when the key or click arrives. True if there
+		// was something to activate.
+		bool ActivateSkyrimTarget(ActivateBy a_by)
 		{
 			auto* pick = RE::CrosshairPickData::GetSingleton();
 			auto* player = RE::PlayerCharacter::GetSingleton();
 			if (!pick || !player) {
-				return;
+				return false;
 			}
 			auto target = pick->GetActiveTarget().get();
 			if (!target || target.get() == player) {
-				logger::info("G: nothing to activate under the crosshair");
-				return;
+				if (a_by == ActivateBy::kG) {
+					logger::info("G: nothing to activate under the crosshair");
+				}
+				return false;  // most right clicks land on nothing Skyrim can activate: stay quiet
 			}
 			target->ActivateRef(player, 0, nullptr, 0, false);
-			logger::info("activated {:08X} ({})", target->GetFormID(), target->GetDisplayFullName());
+			logger::info("{}activated {:08X} ({})", a_by == ActivateBy::kClick ? "right click " : "", target->GetFormID(), target->GetDisplayFullName());
+			return true;
 		}
 
 		void OpenWaitMenu()
@@ -105,7 +121,9 @@ namespace skycraft
 				if (menuOpen) {
 					st.skyrimMenuOpen = true;
 				}
-				const bool route = st.puppeting && !menuOpen;
+				// Minecraft's too while it shows its own world (View.cpp), Skyrim's player parked.
+				const bool view = View::Active();
+				const bool route = (st.puppeting || view) && !menuOpen;
 
 				for (auto* e = *a_event; e; e = e->next) {
 					switch (e->GetEventType()) {
@@ -116,11 +134,18 @@ namespace skycraft
 							}
 							auto* mm = e->AsMouseMoveEvent();
 							if (st.mcScreenOpen) {
-								const int x = std::clamp(st.cursorX.load() + mm->mouseInputX, 0, st.viewportW.load() - 1);
-								const int y = std::clamp(st.cursorY.load() + mm->mouseInputY, 0, st.viewportH.load() - 1);
+								const int vw = std::max(1, st.viewportW.load()), vh = std::max(1, st.viewportH.load());
+								const int x = std::clamp(st.cursorX.load() + mm->mouseInputX, 0, vw - 1);
+								const int y = std::clamp(st.cursorY.load() + mm->mouseInputY, 0, vh - 1);
 								st.cursorX = x;
 								st.cursorY = y;
-								link.PushInput(proto::kInCursor, 0, x, y);
+								// The cursor lives in viewport pixels; Minecraft's frames can be smaller (the
+								// Minecraft view renders at most 1080 high).
+								const int ow = st.overlayW.load(), oh = st.overlayH.load();
+								link.PushInput(proto::kInCursor, 0, ow > 0 ? x * ow / vw : x, oh > 0 ? y * oh / vh : y);
+							} else if (view) {
+								// Minecraft turns its own player in another dimension (Skyrim's look is for the mirror).
+								link.PushInput(proto::kInLook, 0, mm->mouseInputX, mm->mouseInputY);
 							} else {
 								lookDx += static_cast<float>(mm->mouseInputX);
 								lookDy += static_cast<float>(mm->mouseInputY);
@@ -143,10 +168,11 @@ namespace skycraft
 									if (IsSkyrimMenuKey(code)) {
 										break;  // MenuControls (see the hook below) opens Skyrim's menu
 									}
-									if (code == kDikG || code == kDikH || code == kDikO) {
+									// (G and H are Minecraft's keys in the Minecraft view: nothing of Skyrim's is there.)
+									if (code == kDikO || (!view && (code == kDikG || code == kDikH))) {
 										if (down) {
 											if (code == kDikG) {
-												ActivateSkyrimTarget();
+												ActivateSkyrimTarget(ActivateBy::kG);
 											} else if (code == kDikH) {
 												OpenWaitMenu();
 											} else {
@@ -196,7 +222,7 @@ namespace skycraft
 			static RE::BSEventNotifyControl thunk(RE::MenuControls* a_this, RE::InputEvent* const* a_event, RE::BSTEventSource<RE::InputEvent*>* a_source)
 			{
 				auto& st = State();
-				if (!a_event || !*a_event || !st.puppeting || st.skyrimMenuOpen || Game::SkyrimMenuOpen()) {
+				if (!a_event || !*a_event || !(st.puppeting || View::Active()) || st.skyrimMenuOpen || Game::SkyrimMenuOpen()) {
 					return func(a_this, a_event, a_source);  // a Skyrim menu is up: all its input
 				}
 				std::vector<RE::InputEvent*> keep;
@@ -272,6 +298,19 @@ namespace skycraft
 		void ReleaseAll()
 		{
 			Link::Get().PushInput(proto::kInReleaseAll, 0);
+		}
+
+		void UpdateClickActivate(bool a_clicked, float a_delta)
+		{
+			// Counted in frames the game runs, so time spent in a menu that pauses it doesn't count:
+			// the second click of a double click on a chest, read after its menu closes, is dropped.
+			clickCooldown = std::max(0.0f, clickCooldown - std::max(a_delta, 0.0f));
+			if (!a_clicked || clickCooldown > 0.0f || State().mcScreenOpen || Game::SkyrimMenuOpen()) {
+				return;
+			}
+			if (ActivateSkyrimTarget(ActivateBy::kClick)) {
+				clickCooldown = kClickActivateInterval;
+			}
 		}
 
 		void SetActivatePromptKey(bool a_minecraftControls)

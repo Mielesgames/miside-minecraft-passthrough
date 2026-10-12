@@ -1,0 +1,10 @@
+{
+  "type": "skycraft:home",
+  "generator": {
+    "type": "skycraft:classic",
+    "biome_source": {
+      "type": "minecraft:fixed",
+      "biome": "skycraft:home_fields"
+    }
+  }
+}

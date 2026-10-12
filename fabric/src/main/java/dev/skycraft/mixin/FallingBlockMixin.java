@@ -16,7 +16,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class FallingBlockMixin {
 	@Inject(method = "tick", at = @At("HEAD"), cancellable = true)
 	private void skycraft$restOnSkyrim(BlockState state, ServerLevel level, BlockPos pos, RandomSource random, CallbackInfo ci) {
-		if (SkyCollision.supportsFromBelow(pos)) {
+		if (dev.skycraft.SkyDimension.inMirror(level) && SkyCollision.supportsFromBelow(pos)) {
 			ci.cancel();
 		}
 	}

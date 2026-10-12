@@ -1,4 +1,5 @@
 #include "Game.h"
+#include "Perf.h"
 
 #include <d3dcompiler.h>
 
@@ -20,11 +21,13 @@ namespace skycraft
 		ID3D11BlendState*         blend = nullptr;
 		ID3D11BlendState*         invertBlend = nullptr;
 		ID3D11SamplerState*       sampler = nullptr;
+		ID3D11SamplerState*       samplerLinear = nullptr;  // a Minecraft view frame smaller than the screen, scaled up
 		ID3D11RasterizerState*    raster = nullptr;
 		ID3D11DepthStencilState*  depth = nullptr;
 		ID3D11Buffer*             params = nullptr;
 		bool                      haveFrame = false;
 		bool                      flipY = true;
+		bool                      opaqueFrame = false;  // proto::kOverlayOpaque: Minecraft's whole picture (View.cpp)
 		bool                      initFailed = false;
 
 		struct alignas(16) Params
@@ -33,12 +36,13 @@ namespace skycraft
 			float viewport[2];
 			float cursorOn;
 			float flipY;
-			float pad[2];
+			float opaque;
+			float pad;
 			float invertRect[4];  // back buffer pixels: x0, y0, x1, y1 (empty: none)
 		};
 
 		constexpr char kShader[] = R"(
-cbuffer Params : register(b0) { float2 cursor; float2 viewport; float cursorOn; float flipY; float2 pad; float4 invertRect; };
+cbuffer Params : register(b0) { float2 cursor; float2 viewport; float cursorOn; float flipY; float opaque; float pad; float4 invertRect; };
 Texture2D overlay : register(t0);
 SamplerState samp : register(s0);
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -62,8 +66,10 @@ float4 PSInvert(VSOut i) : SV_Target {
 }
 float4 PSMain(VSOut i) : SV_Target {
 	float2 uv = i.uv;
-	if (InInvertRect(i.pos.xy)) return 0;
+	if (opaque < 0.5 && InInvertRect(i.pos.xy)) return 0;
 	float4 c = Overlay(uv);
+	// The Minecraft view: Minecraft's whole picture covers Skyrim's, whatever alpha its passes left.
+	if (opaque > 0.5) c.a = 1;
 	if (cursorOn > 0.5) {
 		float2 p = i.pos.xy - cursor;
 		if (p.x >= 0 && p.y >= 0 && p.y < 18 && p.x <= p.y * 0.6) {
@@ -142,6 +148,8 @@ float4 PSMain(VSOut i) : SV_Target {
 			sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
 			sd.MaxLOD = D3D11_FLOAT32_MAX;
 			device->CreateSamplerState(&sd, &sampler);
+			sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+			device->CreateSamplerState(&sd, &samplerLinear);
 
 			D3D11_RASTERIZER_DESC rd{};
 			rd.FillMode = D3D11_FILL_SOLID;
@@ -161,7 +169,7 @@ float4 PSMain(VSOut i) : SV_Target {
 			cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 			device->CreateBuffer(&cbd, nullptr, &params);
 
-			const bool ok = vs && ps && psInvert && blend && invertBlend && sampler && raster && depth && params;
+			const bool ok = vs && ps && psInvert && blend && invertBlend && sampler && samplerLinear && raster && depth && params;
 			logger::info("overlay renderer {}", ok ? "ready" : "failed to initialize");
 			initFailed = !ok;
 			return ok;
@@ -190,6 +198,8 @@ float4 PSMain(VSOut i) : SV_Target {
 			}
 			texW = a_w;
 			texH = a_h;
+			State().overlayW = static_cast<int>(a_w);
+			State().overlayH = static_cast<int>(a_h);
 			logger::info("overlay texture {}x{}", a_w, a_h);
 			return true;
 		}
@@ -207,6 +217,7 @@ float4 PSMain(VSOut i) : SV_Target {
 			if (!EnsureTexture(hdr->width, hdr->height)) {
 				return;
 			}
+			const auto started = Perf::Now();
 			D3D11_MAPPED_SUBRESOURCE mapped{};
 			if (FAILED(context->Map(texture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
 				return;
@@ -222,8 +233,10 @@ float4 PSMain(VSOut i) : SV_Target {
 				}
 			}
 			context->Unmap(texture, 0);
-			flipY = (hdr->flags & 1) != 0;
+			flipY = (hdr->flags & proto::kOverlayBottomUp) != 0;
+			opaqueFrame = (hdr->flags & proto::kOverlayOpaque) != 0;
 			haveFrame = true;
+			View::NoteUpload(opaqueFrame, double(Perf::Now() - started) / Perf::TicksPerMs(), hdr->width, hdr->height);
 		}
 
 		void DrawOverlay(IDXGISwapChain* a_swapChain)
@@ -295,21 +308,22 @@ float4 PSMain(VSOut i) : SV_Target {
 			D3D11_MAPPED_SUBRESOURCE mapped{};
 			if (SUCCEEDED(context->Map(params, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
 				auto* p = static_cast<Params*>(mapped.pData);
-				// The cursor lives in overlay pixels; scale if the overlay and back buffer differ.
+				// The cursor lives in viewport (back buffer) pixels; Input.cpp scales it for Minecraft.
 				const float sx = texW ? float(bbDesc.Width) / float(texW) : 1.0f;
-				const float sy = texH ? float(bbDesc.Height) / float(texH) : 1.0f;
-				p->cursor[0] = st.cursorX * sx;
-				p->cursor[1] = st.cursorY * sy;
+				p->cursor[0] = float(st.cursorX);
+				p->cursor[1] = float(st.cursorY);
 				p->viewport[0] = float(bbDesc.Width);
 				p->viewport[1] = float(bbDesc.Height);
 				p->cursorOn = st.mcScreenOpen ? 1.0f : 0.0f;
 				p->flipY = flipY ? 1.0f : 0.0f;
+				p->opaque = opaqueFrame ? 1.0f : 0.0f;
+				p->pad = 0.0f;
 				// Around the screen centre, where Minecraft puts the crosshair (15 GUI pixels) and the
 				// attack indicator under it (16 x 16 from 9 GUI pixels below the centre).
 				const int   scale = st.mcGuiScale;
 				const float g = float(scale) * sx;
 				const float cx = float(bbDesc.Width) * 0.5f, cy = float(bbDesc.Height) * 0.5f;
-				invert = st.mcCrosshair && scale > 0;
+				invert = st.mcCrosshair && scale > 0 && !opaqueFrame;  // (a view frame's crosshair is already inverted against Minecraft's world)
 				p->invertRect[0] = invert ? cx - 12.0f * g : 0.0f;
 				p->invertRect[1] = invert ? cy - 12.0f * g : 0.0f;
 				p->invertRect[2] = invert ? cx + 12.0f * g : 0.0f;
@@ -329,7 +343,10 @@ float4 PSMain(VSOut i) : SV_Target {
 			context->VSSetShader(vs, nullptr, 0);
 			context->PSSetShader(ps, nullptr, 0);
 			context->PSSetShaderResources(0, 1, &srv);
-			context->PSSetSamplers(0, 1, &sampler);
+			// A Minecraft view frame rendered smaller than the screen is scaled up smoothly; the usual
+			// overlay is pixel for pixel.
+			const bool scaled = opaqueFrame && (texW != bbDesc.Width || texH != bbDesc.Height);
+			context->PSSetSamplers(0, 1, scaled ? &samplerLinear : &sampler);
 			context->PSSetConstantBuffers(0, 1, &params);
 			context->Draw(3, 0);
 			if (invert) {

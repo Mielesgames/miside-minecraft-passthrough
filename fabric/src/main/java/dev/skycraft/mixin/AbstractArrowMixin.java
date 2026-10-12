@@ -33,7 +33,8 @@ public abstract class AbstractArrowMixin {
 		at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/Level;clipIncludingBorder(Lnet/minecraft/world/level/ClipContext;)Lnet/minecraft/world/phys/BlockHitResult;")
 	)
 	private BlockHitResult skycraft$hitSkyrim(Level level, ClipContext context, Operation<BlockHitResult> original) {
-		return SkyClip.refine(context.getFrom(), context.getTo(), original.call(level, context), SkyClip.Use.PROJECTILE);
+		BlockHitResult vanilla = original.call(level, context);
+		return dev.skycraft.SkyDimension.inMirror(level) ? SkyClip.refine(context.getFrom(), context.getTo(), vanilla, SkyClip.Use.PROJECTILE) : vanilla;
 	}
 
 	@Unique
@@ -60,6 +61,6 @@ public abstract class AbstractArrowMixin {
 		float pitch = (float) (Mth.atan2(v.y, v.horizontalDistance()) * Mth.RAD_TO_DEG);
 		int texture = self instanceof SpectralArrow ? 2 : self instanceof Arrow tippable && tippable.getColor() > 0 ? 1 : 0;
 		Vec3 at = this.skycraft$hitAt;
-		SkyLink.pushEvent(Proto.EV_ARROW_STUCK, actor.formId(), (float) at.x, (float) at.y, (float) at.z, yaw, Float.floatToRawIntBits(pitch), texture);
+		SkyLink.pushEventAt(Proto.EV_ARROW_STUCK, actor.formId(), at.x, at.y, at.z, yaw, Float.floatToRawIntBits(pitch), texture);
 	}
 }

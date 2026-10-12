@@ -18,7 +18,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 public abstract class EntityCollideMixin {
 	@Inject(method = "collide", at = @At("RETURN"), cancellable = true)
 	private void skycraft$smoothSkyrimCollision(Vec3 movement, CallbackInfoReturnable<Vec3> cir) {
-		if ((Object) this instanceof LocalPlayer player && SkyClient.linked() && !player.noPhysics) {
+		if ((Object) this instanceof LocalPlayer player && SkyClient.linked() && !player.noPhysics && dev.skycraft.SkyDimension.inMirror(player.level())) {
 			cir.setReturnValue(SkyCollider.collide(player, cir.getReturnValue()));
 		}
 	}

@@ -5,7 +5,9 @@ import com.mojang.blaze3d.vertex.VertexConsumer;
 import dev.skycraft.SkyCraft;
 import dev.skycraft.link.Proto;
 import dev.skycraft.link.SkyLink;
+import dev.skycraft.link.SkySpace;
 import dev.skycraft.world.SkyClip;
+import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongLinkedOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.nio.ByteBuffer;
@@ -63,6 +65,15 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 public final class WorldExporter {
 	private static final int SECTIONS_PER_FRAME = 12;
 	private static final double ENTITY_RANGE = 96.0;
+	// Dropped and thrown items this close to the camera are drawn with Minecraft's own model
+	// (AvatarExporter's scene: sprites extruded a pixel thick, block models, a few copies for a
+	// stack, Minecraft's bobbing and spinning); further ones, or past the count, as a flat sprite or
+	// a small cube from here, which costs far less to send every frame.
+	private static final double ITEM_MODEL_RANGE = 16.0;
+	private static final int ITEM_MODEL_MAX = 24;
+	private static final IntOpenHashSet MODELLED = new IntOpenHashSet();
+	private static final List<Entity> NEAR_ITEMS = new ArrayList<>();
+	private static boolean itemModelsOff;
 
 	private static final LongLinkedOpenHashSet DIRTY = new LongLinkedOpenHashSet();
 	private static final LongOpenHashSet SENT = new LongOpenHashSet(); // sections Skyrim holds a mesh for
@@ -74,6 +85,9 @@ public final class WorldExporter {
 	private static int sentGeneration = Integer.MIN_VALUE;
 	private static int meshesSent;
 	private static ClientLevel sentLevel;
+	// The space (SkySpace) of the Skyrim world Skyrim holds our blocks for: only its sections go, in its
+	// world's terms. The player moving to another space (another Skyrim world) starts Skyrim over.
+	private static int sentSpace = Integer.MIN_VALUE;
 	private static SkyAtlas atlas;
 	private static ModelBlockRenderer blockRenderer;
 	private static FluidRenderer fluidRenderer;
@@ -105,8 +119,17 @@ public final class WorldExporter {
 		if (level == null || minecraft.player == null || !SkyLink.active()) {
 			return;
 		}
+		int space = dev.skycraft.client.SkyClient.sky().space;
+		if (space < 0) {
+			return; // a guest still waiting to hear where this Skyrim world's blocks are
+		}
 		if (sentGeneration != SkyLink.generation() || sentLevel != level || atlas == null || atlas.stale(minecraft)) {
-			resendEverything(minecraft, level);
+			resendEverything(minecraft, level, space);
+		} else if (space != sentSpace) {
+			// Skyrim is in another world: what it shows of the last one goes, this one's comes (once the
+			// player is there).
+			SkyCraft.LOG.info("SkyCraft: Skyrim's world is in space {} now (was {}); its blocks start over", space, sentSpace);
+			resendWorld(minecraft, level, space);
 		}
 		meshDirtySections(level);
 		// Animated textures (water, lava, fire, ...): the frame for this game tick.
@@ -118,7 +141,7 @@ public final class WorldExporter {
 		AvatarExporter.frame(minecraft, atlas, partialTick);
 	}
 
-	private static void resendEverything(Minecraft minecraft, ClientLevel level) {
+	private static void resendEverything(Minecraft minecraft, ClientLevel level, int space) {
 		sentGeneration = SkyLink.generation();
 		sentLevel = level;
 		atlas = SkyAtlas.build(minecraft);
@@ -133,6 +156,21 @@ public final class WorldExporter {
 		ByteBuffer header = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putInt(atlas.width).putInt(atlas.height).flip();
 		boolean ok = SkyLink.writeRender(Proto.REN_ATLAS, header, atlas.pixels.duplicate().clear());
 		SkyCraft.LOG.info("SkyCraft: sent {}x{} texture atlas to Skyrim ({})", atlas.width, atlas.height, ok ? "ok" : "FAILED");
+		resendSections(minecraft, level, space);
+	}
+
+	/** Skyrim drops every block, light, NPC wall and dug cell it holds; the ones round the player go again. */
+	private static void resendWorld(Minecraft minecraft, ClientLevel level, int space) {
+		AvatarExporter.reset();
+		SkyLink.writeRender(Proto.REN_CLEAR_ALL, ByteBuffer.allocate(0), null);
+		resendSections(minecraft, level, space);
+	}
+
+	private static void resendSections(Minecraft minecraft, ClientLevel level, int space) {
+		sentSpace = space;
+		synchronized (DIRTY) {
+			DIRTY.clear(); // the last space's are no use now; this one's are all marked below
+		}
 		SENT.clear();
 		LIT.clear();
 		SOLID.clear();
@@ -184,6 +222,11 @@ public final class WorldExporter {
 	/** Returns true if real meshing work was done. */
 	private static boolean meshSection(ClientLevel level, long key) {
 		int sx = SectionPos.x(key), sy = SectionPos.y(key), sz = SectionPos.z(key);
+		if (SkySpace.spaceAt(sx * 16 + 8, sz * 16 + 8) != sentSpace) {
+			return false; // another Skyrim world's (still loaded just after a world change): not Skyrim's to draw here
+		}
+		// Skyrim gets the section in its world's terms.
+		int lx = SkySpace.localSection(sx), lz = SkySpace.localSection(sz);
 		LevelChunk chunk = level.getChunkSource().getChunk(sx, sz, ChunkStatus.FULL, false);
 		if (chunk == null) {
 			return false; // unloaded: Skyrim keeps what it has
@@ -255,7 +298,7 @@ public final class WorldExporter {
 			&& !DUG.contains(key)) {
 			return true;
 		}
-		ByteBuffer header = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(MESH.vertexCount()).flip();
+		ByteBuffer header = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(lx).putInt(sy).putInt(lz).putInt(MESH.vertexCount()).flip();
 		if (SkyLink.writeRender(Proto.REN_SECTION, header, MESH.bytes())) {
 			if (MESH.vertexCount() > 0) {
 				SENT.add(key);
@@ -263,7 +306,7 @@ public final class WorldExporter {
 				SENT.remove(key);
 			}
 			if (lightCount > 0 || LIT.contains(key)) {
-				ByteBuffer lightHeader = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(lightCount).flip();
+				ByteBuffer lightHeader = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(lx).putInt(sy).putInt(lz).putInt(lightCount).flip();
 				if (!SkyLink.writeRender(Proto.REN_LIGHTS, lightHeader, LIGHTS.flip())) {
 					markDirty(sx, sy, sz); // ring full; send both again later
 				} else if (lightCount > 0) {
@@ -273,7 +316,7 @@ public final class WorldExporter {
 				}
 			}
 			if (solidCount > 0 || SOLID.contains(key)) {
-				ByteBuffer solidHeader = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(solidCount).flip();
+				ByteBuffer solidHeader = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(lx).putInt(sy).putInt(lz).putInt(solidCount).flip();
 				ByteBuffer bits = ByteBuffer.allocate(solidCount > 0 ? 512 : 0).order(ByteOrder.LITTLE_ENDIAN);
 				if (solidCount > 0) {
 					for (long word : SOLID_BITS) {
@@ -290,7 +333,7 @@ public final class WorldExporter {
 			}
 			// Cells dug out of Skyrim's world: its geometry there goes.
 			if (dugCount > 0 || DUG.contains(key)) {
-				ByteBuffer dugHeader = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(dugCount)
+				ByteBuffer dugHeader = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).putInt(lx).putInt(sy).putInt(lz).putInt(dugCount)
 					.putInt(dev.skycraft.client.SkyDigClient.world()).putInt(0).flip();
 				ByteBuffer bits = ByteBuffer.allocate(dugCount > 0 ? 512 : 0).order(ByteOrder.LITTLE_ENDIAN);
 				if (dugCount > 0) {
@@ -315,14 +358,56 @@ public final class WorldExporter {
 		return true;
 	}
 
+	/** True if AvatarExporter's scene draws this dropped or thrown item this frame, with Minecraft's own model. */
+	static boolean modelled(Entity e) {
+		return MODELLED.contains(e.getId());
+	}
+
+	/** An item's model couldn't be captured: every item is drawn from here (flat sprite, cube) from now on. */
+	static void stopModellingItems() {
+		if (!itemModelsOff) {
+			itemModelsOff = true;
+			SkyCraft.LOG.warn("SkyCraft: dropped items go to Skyrim as flat sprites from now on");
+		}
+	}
+
+	/** The dropped and thrown items nearest the camera, up to ITEM_MODEL_MAX within ITEM_MODEL_RANGE. */
+	private static void pickModelledItems(Minecraft minecraft, ClientLevel level) {
+		MODELLED.clear();
+		NEAR_ITEMS.clear();
+		if (itemModelsOff) {
+			return;
+		}
+		Vec3 cam = minecraft.gameRenderer.mainCamera().position();
+		for (Entity e : level.entitiesForRendering()) {
+			if ((e instanceof ItemEntity || e instanceof ItemSupplier) && !(e instanceof AbstractArrow) && e.distanceToSqr(cam) <= ITEM_MODEL_RANGE * ITEM_MODEL_RANGE) {
+				NEAR_ITEMS.add(e);
+			}
+		}
+		if (NEAR_ITEMS.size() > ITEM_MODEL_MAX) {
+			NEAR_ITEMS.sort(java.util.Comparator.comparingDouble(e -> e.distanceToSqr(cam)));
+		}
+		for (int i = 0; i < NEAR_ITEMS.size() && i < ITEM_MODEL_MAX; i++) {
+			MODELLED.add(NEAR_ITEMS.get(i).getId());
+		}
+		NEAR_ITEMS.clear();
+	}
+
 	private static void exportEntities(Minecraft minecraft, ClientLevel level, float partialTick) {
 		ENTITIES.clear();
+		pickModelledItems(minecraft, level);
 		Vec3 eye = minecraft.player.getEyePosition(partialTick);
 		for (Entity e : level.entitiesForRendering()) {
 			if (ENTITIES.size() >= Proto.MAX_WORLD_ENTITIES || e.distanceToSqr(eye) > ENTITY_RANGE * ENTITY_RANGE) {
 				continue;
 			}
+			if (MODELLED.contains(e.getId())) {
+				continue; // AvatarExporter's scene has it
+			}
 			Vec3 p = e.getPosition(partialTick);
+			if (SkySpace.spaceAt(p.x, p.z) != sentSpace) {
+				continue; // in another Skyrim world's space (just after a world change)
+			}
 			if (e instanceof AbstractArrow arrow) {
 				boolean trident = arrow instanceof ThrownTrident;
 				int kind = trident ? Proto.WE_TRIDENT : Proto.WE_ARROW;
@@ -332,7 +417,7 @@ public final class WorldExporter {
 				float[] uv = trident ? ICONS.computeIfAbsent(Items.TRIDENT, i -> iconUv(minecraft, level, new ItemStack(i)))
 					: atlas.arrowUv(arrow instanceof SpectralArrow ? 2 : arrow instanceof Arrow tippable && tippable.getColor() > 0 ? 1 : 0);
 				if (uv != null) {
-					ENTITIES.add(new SkyLink.WorldEntity(kind, e.getId(), (float) p.x, (float) p.y, (float) p.z, yaw, pitch, 1.0F, null, uv, 0));
+					ENTITIES.add(new SkyLink.WorldEntity(kind, e.getId(), p.x, p.y, p.z, yaw, pitch, 1.0F, null, uv, 0));
 				}
 			} else if (e instanceof ItemEntity item) {
 				float bob = Mth.sin((item.getAge() + partialTick) / 10.0F + item.bobOffs) * 0.1F + 0.1F;
@@ -343,11 +428,15 @@ public final class WorldExporter {
 			} else if (e instanceof net.minecraft.world.entity.LivingEntity && !(e instanceof dev.skycraft.combat.SkyrimActorEntity) && !e.isInvisible()
 				&& (e != minecraft.player || minecraft.gameRenderer.mainCamera().isDetached())) {
 				// Players and mobs: Skyrim darkens the ground softly under their feet.
-				ENTITIES.add(new SkyLink.WorldEntity(Proto.WE_SHADOW, e.getId(), (float) p.x, (float) p.y, (float) p.z, 0.0F, 0.0F, e.getBbWidth(), null, null, 0));
+				ENTITIES.add(new SkyLink.WorldEntity(Proto.WE_SHADOW, e.getId(), p.x, p.y, p.z, 0.0F, 0.0F, e.getBbWidth(), null, null, 0));
 			}
 		}
 		addCracks(level);
-		SkyLink.writeWorldEntities(ENTITIES, selection(minecraft, level));
+		double[] selection = selection(minecraft, level);
+		if (selection != null && SkySpace.spaceAt(selection[0], selection[2]) != sentSpace) {
+			selection = null;
+		}
+		SkyLink.writeWorldEntities(ENTITIES, selection);
 	}
 
 	/**
@@ -364,7 +453,7 @@ public final class WorldExporter {
 					float size = 0.25F;
 					int tint = cubeTint(minecraft, state);
 					ENTITIES.add(new SkyLink.WorldEntity(
-						Proto.WE_BLOCK, e.getId(), (float) p.x, (float) (p.y + size * 0.5 + 0.02), (float) p.z, yaw, 0.0F, size, null, faces, tint
+						Proto.WE_BLOCK, e.getId(), p.x, p.y + size * 0.5 + 0.02, p.z, yaw, 0.0F, size, null, faces, tint
 					));
 					return;
 				}
@@ -372,7 +461,7 @@ public final class WorldExporter {
 		}
 		float[] uv = iconUv(minecraft, level, stack);
 		if (uv != null) {
-			ENTITIES.add(new SkyLink.WorldEntity(Proto.WE_ITEM, e.getId(), (float) p.x, (float) p.y + 0.25F, (float) p.z, yaw, 0.0F, 0.5F, null, uv, 0));
+			ENTITIES.add(new SkyLink.WorldEntity(Proto.WE_ITEM, e.getId(), p.x, p.y + 0.25, p.z, yaw, 0.0F, 0.5F, null, uv, 0));
 		}
 	}
 
@@ -421,13 +510,16 @@ public final class WorldExporter {
 				continue;
 			}
 			BlockPos pos = progress.getPos();
+			if (SkySpace.spaceAt(pos.getX(), pos.getZ()) != sentSpace) {
+				continue; // someone mining in another Skyrim world's space
+			}
 			VoxelShape shape = level.getBlockState(pos).getShape(level, pos);
 			if (shape.isEmpty()) {
 				continue;
 			}
 			AABB box = shape.bounds().move(pos).inflate(0.004);
 			ENTITIES.add(new SkyLink.WorldEntity(
-				Proto.WE_CRACK, pos.hashCode(), (float) box.minX, (float) box.minY, (float) box.minZ, 0.0F, 0.0F, 1.0F,
+				Proto.WE_CRACK, pos.hashCode(), box.minX, box.minY, box.minZ, 0.0F, 0.0F, 1.0F,
 				new float[] { (float) box.getXsize(), (float) box.getYsize(), (float) box.getZsize() }, atlas.crackUv(stage), 0
 			));
 		}
@@ -445,7 +537,7 @@ public final class WorldExporter {
 	}
 
 	/** Outline for Skyrim to draw: the targeted block, or where a held block would go on Skyrim ground. */
-	private static float[] selection(Minecraft minecraft, ClientLevel level) {
+	private static double[] selection(Minecraft minecraft, ClientLevel level) {
 		HitResult hit = minecraft.hitResult;
 		if (!(hit instanceof BlockHitResult blockHit) || hit.getType() != HitResult.Type.BLOCK || minecraft.gui.screen() != null) {
 			return null;
@@ -455,14 +547,14 @@ public final class WorldExporter {
 			if (!(minecraft.player.getMainHandItem().getItem() instanceof BlockItem)) {
 				return null;
 			}
-			return new float[] { pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1 };
+			return new double[] { pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1 };
 		}
 		VoxelShape shape = level.getBlockState(pos).getShape(level, pos);
 		if (shape.isEmpty()) {
 			return null;
 		}
 		AABB box = shape.bounds().move(pos);
-		return new float[] { (float) box.minX, (float) box.minY, (float) box.minZ, (float) box.maxX, (float) box.maxY, (float) box.maxZ };
+		return new double[] { box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ };
 	}
 
 	/**

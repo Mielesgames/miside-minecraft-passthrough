@@ -9,7 +9,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * Skyrim draws the world. While linked, Minecraft renders nothing of its own level (no sky,
- * clouds, fog or terrain) so the overlay is just hand + HUD on a transparent background.
+ * clouds, fog or terrain) so the overlay is just hand + HUD on a transparent background. In any
+ * other dimension than the Skyrim mirror (MinecraftView) Minecraft draws its own world as usual.
  */
 @Mixin(LevelRenderer.class)
 public abstract class LevelRendererMixin {
@@ -19,7 +20,7 @@ public abstract class LevelRendererMixin {
 		cancellable = true
 	)
 	private void skycraft$skipLevel(CallbackInfo ci) {
-		if (SkyClient.linked()) {
+		if (SkyClient.linked() && !dev.skycraft.client.MinecraftView.away()) {
 			ci.cancel();
 		}
 	}

@@ -13,7 +13,9 @@ import net.minecraft.client.Minecraft;
 
 /**
  * Copies Minecraft's main render target (hand + HUD + screens on a transparent background) back
- * from the GPU and publishes it to Skyrim through the overlay triple buffer.
+ * from the GPU and publishes it to Skyrim through the overlay triple buffer. In another dimension
+ * (MinecraftView) the target holds Minecraft's whole picture, world included, and goes out flagged
+ * as an opaque full frame.
  *
  * The copy is asynchronous: a frame is captured into one of a few staging buffers and shipped
  * once the GPU says the copy finished, typically a frame later.
@@ -34,12 +36,18 @@ public final class FrameExporter {
 		int height;
 		volatile int state = FREE;
 		long frameId;
+		boolean opaque;
 	}
 
 	private FrameExporter() {
 	}
 
 	public static void capture(Minecraft minecraft) {
+		capture(minecraft, false);
+	}
+
+	/** {@code opaque}: the frame is Minecraft's whole picture (MinecraftView), not an overlay. */
+	public static void capture(Minecraft minecraft, boolean opaque) {
 		shipReadyFrames();
 
 		RenderTarget target = minecraft.gameRenderer.mainRenderTarget();
@@ -73,6 +81,7 @@ public final class FrameExporter {
 			}
 		}
 		if (slot == null) {
+			MinecraftView.noteSkipped();
 			return; // all staging buffers still in flight; skip this frame
 		}
 
@@ -88,6 +97,7 @@ public final class FrameExporter {
 		final Staging captured = slot;
 		captured.state = PENDING;
 		captured.frameId = nextFrameId++;
+		captured.opaque = opaque;
 		RenderSystem.getDevice().createCommandEncoder().copyTextureToBuffer(color, captured.buffer, 0L, () -> captured.state = READY, 0);
 	}
 
@@ -104,12 +114,14 @@ public final class FrameExporter {
 		}
 		MemorySegment shm = SkyLink.segment();
 		if (shm != null) {
+			long started = System.nanoTime();
 			long bytes = (long) newest.width * newest.height * 4L;
 			try (GpuBufferSlice.MappedView view = newest.buffer.map(true, false)) {
 				MemorySegment src = MemorySegment.ofBuffer(view.data());
 				MemorySegment.copy(src, 0, shm, SkyLink.overlayBackSlotOffset(), Math.min(bytes, src.byteSize()));
 			}
-			SkyLink.publishOverlay(newest.width, newest.height, true, newest.frameId);
+			SkyLink.publishOverlay(newest.width, newest.height, Proto.OVERLAY_BOTTOM_UP | (newest.opaque ? Proto.OVERLAY_OPAQUE : 0), newest.frameId);
+			MinecraftView.noteShipped(System.nanoTime() - started, newest.width, newest.height, newest.opaque);
 		}
 		// Anything older than what we just shipped is useless now.
 		for (Staging s : staging) {

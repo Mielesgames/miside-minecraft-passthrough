@@ -103,6 +103,7 @@ namespace skycraft
 		std::memset(base_ + proto::kOffActorTable, 0, sizeof(proto::ActorTable));
 		std::memset(base_ + proto::kOffEventRing, 0, proto::kEventRingDataOff);
 		std::memset(base_ + proto::kOffWorldEntities, 0, sizeof(proto::WorldEntities));
+		std::memset(base_ + proto::kOffBreachTable, 0, sizeof(proto::BreachTable));
 		std::memset(base_ + proto::kOffRenderRing, 0, proto::kRenRingDataOff);
 		header->version = proto::kVersion;
 		header->skyrimPid = ::GetCurrentProcessId();
@@ -253,6 +254,42 @@ namespace skycraft
 			std::memcpy(table->actors, a_records, sizeof(proto::ActorRecord) * count);
 		}
 		seq.store(s + 2, std::memory_order_release);
+	}
+
+	void Link::WriteBreaches(const proto::BreachRecord* a_records, std::uint32_t a_count, std::uint32_t a_worldId)
+	{
+		if (!base_) {
+			return;
+		}
+		auto*      table = At<proto::BreachTable>(proto::kOffBreachTable);
+		auto       seq = Atomic(table->seq);
+		const auto s = seq.load(std::memory_order_relaxed);
+		seq.store(s + 1, std::memory_order_relaxed);
+		std::atomic_thread_fence(std::memory_order_release);
+		const auto count = a_records ? std::min(a_count, proto::kMaxBreaches) : 0u;
+		table->count = count;
+		table->worldId = a_worldId;
+		if (count) {
+			std::memcpy(table->records, a_records, sizeof(proto::BreachRecord) * count);
+		}
+		seq.store(s + 2, std::memory_order_release);
+	}
+
+	void Link::PushItem(const proto::ItemEvent& a_item)
+	{
+		if (!base_) {
+			return;
+		}
+		auto* ring = base_ + proto::kOffItemRing;
+		auto& headRef = *reinterpret_cast<std::uint64_t*>(ring + proto::kItemRingHeadOff);
+		auto& tailRef = *reinterpret_cast<std::uint64_t*>(ring + proto::kItemRingTailOff);
+		const auto head = Atomic(headRef).load(std::memory_order_relaxed);
+		const auto tail = Atomic(tailRef).load(std::memory_order_acquire);
+		if (head - tail >= proto::kItemRingEntries) {
+			return;
+		}
+		reinterpret_cast<proto::ItemEvent*>(ring + proto::kItemRingDataOff)[head & (proto::kItemRingEntries - 1)] = a_item;
+		Atomic(headRef).store(head + 1, std::memory_order_release);
 	}
 
 	bool Link::PopEvent(proto::McEvent& a_out)

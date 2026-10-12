@@ -14,6 +14,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class ClientLevelDigMixin {
 	@Inject(method = "setBlocksDirty", at = @At("HEAD"))
 	private void skycraft$blockChanged(BlockPos pos, BlockState oldState, BlockState newState, CallbackInfo ci) {
-		SkyDigClient.blockChanged((ClientLevel) (Object) this, pos, oldState, newState);
+		ClientLevel level = (ClientLevel) (Object) this;
+		if (dev.skycraft.SkyDimension.inMirror(level)) { // dug Skyrim ground is only in the mirror
+			SkyDigClient.blockChanged(level, pos, oldState, newState);
+		}
 	}
 }

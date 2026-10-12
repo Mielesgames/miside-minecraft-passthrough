@@ -41,6 +41,12 @@ namespace skycraft
 		// scale: the overlay draws it inverted against Skyrim's picture, as Minecraft does.
 		std::atomic<bool> mcCrosshair{ false };
 		std::atomic<int>  mcGuiScale{ 0 };
+
+		// The size of Minecraft's frames (0 before the first), which can be smaller than the viewport
+		// (the Minecraft view renders at most 1080 high): the cursor is kept in viewport pixels and
+		// sent to Minecraft in these.
+		std::atomic<int> overlayW{ 0 };
+		std::atomic<int> overlayH{ 0 };
 	};
 
 	Runtime& State();
@@ -100,6 +106,10 @@ namespace skycraft
 		void ConsumeLook(float& a_dx, float& a_dy);
 		// Tells MC to release everything (input focus moved to Skyrim).
 		void ReleaseAll();
+		// Main thread, once per frame Minecraft drives the player (Combat::PerFrame). a_clicked: a
+		// right click Minecraft had no use for arrived this frame (proto::kEvActivate). Activates what
+		// Skyrim's crosshair is on now, as G does, at most once per 0.4 s; nothing there, nothing done.
+		void UpdateClickActivate(bool a_clicked, float a_delta);
 	}
 
 	namespace Input
@@ -175,5 +185,41 @@ namespace skycraft
 	namespace Overlay
 	{
 		void Install();
+	}
+
+	// Minecraft view (View.cpp): while Minecraft's player is in a dimension other than the Skyrim
+	// mirror (proto::kMcOtherDimension), Minecraft's own full frame covers the screen (Overlay.cpp) and
+	// Skyrim's player is parked where they stood: held in place, in god mode, nobody fighting them,
+	// HUD hidden, Skyrim's world not drawn. Main thread unless said otherwise.
+	namespace View
+	{
+		enum class Change
+		{
+			kNone,
+			kParked,              // Minecraft just left the mirror: Skyrim's player is parked now
+			kBackMinecraftLeads,  // back in the mirror: Skyrim's player was moved to Minecraft's (Result::handover)
+			kBackSkyrimLeads,     // back, but Skyrim's player can't follow (dead, another world, Minecraft gone):
+			                      // Skyrim teleports Minecraft's player to its own, as after a load
+		};
+
+		struct Result
+		{
+			bool         parked{ false };  // Skyrim's player is parked this frame
+			Change       change{ Change::kNone };
+			RE::NiPoint3 handover{};       // kBackMinecraftLeads: where Skyrim's player is now
+			bool         farAway{ false };     // kBackMinecraftLeads: far from where they waited (the world there is still loading)
+		};
+
+		// Every frame, from Game's update, before its puppet decision. a_mc: Minecraft's state, null when
+		// it isn't connected (a_mcAlive false) or the read was torn; a_menu: a Skyrim menu is open;
+		// a_puppeting: Minecraft drove the player last frame.
+		Result Update(RE::PlayerCharacter* a_player, const proto::McState* a_mc, bool a_mcAlive, bool a_loading, bool a_menu, std::uint32_t a_worldId,
+			bool a_puppeting, float a_delta);
+		// Minecraft shows its own world and Skyrim's player is parked (any thread).
+		bool Active();
+		// Combat's KillPlayer, just before the Skyrim player is killed for Minecraft's death: lifts the park's god mode.
+		void BeforeKill(RE::PlayerCharacter* a_player);
+		// Overlay (render thread): a Minecraft frame was uploaded (a_opaque: a full Minecraft view frame) in a_ms.
+		void NoteUpload(bool a_opaque, double a_ms, std::uint32_t a_w, std::uint32_t a_h);
 	}
 }

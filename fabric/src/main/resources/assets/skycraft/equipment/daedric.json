@@ -1,0 +1,14 @@
+{
+  "layers": {
+    "humanoid": [
+      {
+        "texture": "skycraft:daedric"
+      }
+    ],
+    "humanoid_leggings": [
+      {
+        "texture": "skycraft:daedric"
+      }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "equipment",
+  "key": {
+    "M": "skycraft:ebony_ingot",
+    "L": "skycraft:leather_strips",
+    "H": "skycraft:daedra_heart"
+  },
+  "pattern": [
+    "MHM",
+    "MLM"
+  ],
+  "result": {
+    "id": "skycraft:daedric_helmet"
+  }
+}

@@ -272,16 +272,43 @@ namespace skycraft::Dig
 
 	namespace
 	{
+		// The player while Minecraft drives them: Minecraft keeps them out of the ground itself (and
+		// puts them on open ground if they ever end up in it). Skyrim's rescue would lift them onto the
+		// land straight up, inside whatever rock or blocks are there, and Minecraft would follow.
+		bool IsThePuppet(const RE::NiPoint3& a_pos)
+		{
+			if (!puppet.load(std::memory_order_relaxed)) {
+				return false;
+			}
+			auto* player = RE::PlayerCharacter::GetSingleton();
+			if (!player) {
+				return false;
+			}
+			// The update asks about the actor's own position (within a frame's step; half a block of
+			// slack, and no NPC stands that close to the player).
+			const auto here = player->GetPosition();
+			return std::fabs(here.x - a_pos.x) < 35.0f && std::fabs(here.y - a_pos.y) < 35.0f;
+		}
+
 		// Every actor's movement update (AE 37507) asks for the land's height under it (TES
 		// GetLandHeight, AE 13344) and, if that's more than 30 units above the actor, puts the actor
 		// back on top of the land: Skyrim's rescue for characters that fell through the ground. In a
-		// dug hole or tunnel that ground is gone (or they're meant to be under it), so it mustn't.
+		// dug hole or tunnel that ground is gone (or they're meant to be under it), so it mustn't; nor
+		// for the player while Minecraft drives them.
 		struct LandRescueHook
 		{
 			static bool thunk(RE::TES* a_tes, const RE::NiPoint3& a_pos, float& a_height)
 			{
 				Perf::Scope timer(Perf::kHookLand);
 				const bool found = func(a_tes, a_pos, a_height);
+				if (a_height > a_pos.z && IsThePuppet(a_pos)) {
+					static std::atomic<int> logged{ 0 };
+					if (a_height - a_pos.z > 30.0f && logged.fetch_add(1) < 5) {
+						logger::info("dig: Skyrim's land rescue left off the player {:.0f} units under the land (Minecraft keeps them out of it)", a_height - a_pos.z);
+					}
+					a_height = a_pos.z;
+					return found;
+				}
 				if (Any() && a_height > a_pos.z) {
 					const auto actor = SkyToMc(a_pos);
 					const auto land = SkyToMc(RE::NiPoint3(a_pos.x, a_pos.y, a_height));

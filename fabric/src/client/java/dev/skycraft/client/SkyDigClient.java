@@ -7,6 +7,7 @@ import dev.skycraft.net.SkyNet;
 import dev.skycraft.world.SkyClip;
 import dev.skycraft.world.SkyCollision;
 import dev.skycraft.world.SkyDig;
+import dev.skycraft.world.SkyGround;
 import dev.skycraft.world.SkyRay;
 import it.unimi.dsi.fastutil.longs.Long2IntLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
@@ -52,6 +53,11 @@ public final class SkyDigClient {
 	private static final SkyDig.DugColumn NONE = new SkyDig.DugColumn(List.of());
 	private static int seenWorld = Integer.MIN_VALUE;
 	private static int pollTicks;
+	// Open dug cells whose neighbours were looked at again (see heal), in this Skyrim world.
+	private static final LongOpenHashSet HEALED = new LongOpenHashSet();
+	private static int healedWorld = Integer.MIN_VALUE;
+	private static final int HEAL_RADIUS = 4;
+	private static final int HEAL_PER_PASS = 8;
 
 	/** The Skyrim world the player is in (worldspace or interior cell). */
 	public static int world() {
@@ -139,21 +145,24 @@ public final class SkyDigClient {
 		int world = world();
 		SkyDig.clientWorld = world;
 		SkyDig.clientDug = (x, y, z) -> SkyDig.isDug(level, world, new BlockPos(x, y, z));
+		SkyGround.floorY = level.getMinY() + 8;
 		reveal(level);
 		if (++pollTicks % 5 == 0) {
 			pollDug(minecraft, level);
+			heal(minecraft, level);
 		}
-		// Skyrim's geometry around dug cells arrived or changed: their walls are drawn again.
+		// Skyrim's geometry around dug cells arrived or changed: their walls are drawn again (as far
+		// down as the land over a cell is looked for).
 		SkyCollision.takeChangedRegions(key -> {
 			int rx = BlockPos.getX(key), ry = BlockPos.getY(key), rz = BlockPos.getZ(key);
 			SkyDig.wallsChanged(rx, ry, rz, rx + 7, ry + 7, rz + 7);
-			for (int sx = (rx - 1) >> 4; sx <= (rx + 8) >> 4; sx++) {
-				for (int sz = (rz - 1) >> 4; sz <= (rz + 8) >> 4; sz++) {
+			for (int sx = (rx - 3) >> 4; sx <= (rx + 10) >> 4; sx++) {
+				for (int sz = (rz - 3) >> 4; sz <= (rz + 10) >> 4; sz++) {
 					LevelChunk chunk = level.getChunkSource().getChunk(sx, sz, ChunkStatus.FULL, false);
 					if (chunk == null) {
 						continue;
 					}
-					for (int sy = (ry - 1) >> 4; sy <= (ry + 8) >> 4; sy++) {
+					for (int sy = (ry - 3 - (int) SkyGround.DEEP_REACH) >> 4; sy <= (ry + 10) >> 4; sy++) {
 						if (dugBits(chunk, sy) != null) {
 							WorldExporter.markDirty(sx, sy, sz);
 						}
@@ -201,11 +210,64 @@ public final class SkyDigClient {
 				REVEAL.put(key, tries); // Skyrim's geometry there hasn't arrived yet
 			} else {
 				REVEAL.remove(key);
+				if (waiting) {
+					HEALED.remove(key); // looked at again when the player is next near
+				}
 			}
 		}
 		for (int i = 0; i < cells.size(); i += 64) {
 			int end = Math.min(cells.size(), i + 64);
 			ClientPlayNetworking.send(new SkyNet.DigReveal(world, List.copyOf(cells.subList(i, end)), List.copyOf(materials.subList(i, end))));
+		}
+	}
+
+	/**
+	 * Holes left by older digs, or by cells judged wrongly then: every open dug cell near the player
+	 * has its neighbours looked at once more (a few a pass), so any inside Skyrim's ground or rock
+	 * becomes a block and nothing opens into the void.
+	 */
+	private static void heal(Minecraft minecraft, ClientLevel level) {
+		int world = world();
+		if (world != healedWorld || HEALED.size() > 65536) {
+			HEALED.clear();
+			healedWorld = world;
+		}
+		if ((!SkyDig.destruction && minecraft.hasSingleplayerServer()) || !SkyCollision.active()) {
+			return;
+		}
+		queueAround(level, world, minecraft.player.blockPosition(), HEAL_RADIUS, HEAL_PER_PASS, false);
+	}
+
+	/** After the player was rescued from a hole: the open dug cells around a spot are looked at again. */
+	public static void healAround(BlockPos centre, int radius) {
+		ClientLevel level = Minecraft.getInstance().level;
+		if (level != null) {
+			queueAround(level, world(), centre, radius, 512, true);
+		}
+	}
+
+	private static void queueAround(ClientLevel level, int world, BlockPos centre, int radius, int limit, boolean again) {
+		int queued = 0;
+		BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
+		for (int dy = -radius; dy <= radius; dy++) {
+			for (int dx = -radius; dx <= radius; dx++) {
+				for (int dz = -radius; dz <= radius; dz++) {
+					p.set(centre.getX() + dx, centre.getY() + dy, centre.getZ() + dz);
+					long key = p.asLong();
+					if ((!again && HEALED.contains(key)) || REVEAL.containsKey(key) || !SkyDig.isDug(level, world, p)) {
+						continue;
+					}
+					HEALED.add(key);
+					BlockState state = level.getBlockState(p);
+					if (!state.isAir() && !state.canBeReplaced()) {
+						continue; // a block fills it: its neighbours are looked at when it's broken
+					}
+					REVEAL.put(key, REVEAL_TRIES);
+					if (++queued >= limit) {
+						return;
+					}
+				}
+			}
 		}
 	}
 

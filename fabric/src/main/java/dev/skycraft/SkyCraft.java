@@ -22,8 +22,13 @@ public final class SkyCraft implements ModInitializer {
 	@Override
 	public void onInitialize() {
 		SkyCombat.init();
+		dev.skycraft.gear.SkyGear.init();
+		dev.skycraft.world.SpaceMigration.init(); // each Skyrim world's blocks in a space of their own (SkySpace)
 		dev.skycraft.net.SkyNet.init();
 		dev.skycraft.world.SkyDig.init();
+		dev.skycraft.breach.SkyBreach.init();
+		dev.skycraft.portal.SkyPortals.init(); // portal network: soul gem items, tick, frame breaks
+		dev.skycraft.worlds.SkyWorlds.init();
 		ServerLifecycleEvents.SERVER_STARTED.register(SkyCraft::configureServer);
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
 			giveStarterKit(handler.getPlayer());

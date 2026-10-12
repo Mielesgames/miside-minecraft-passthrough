@@ -31,6 +31,10 @@ public abstract class BlockCollisionsMixin {
 		CollisionContext context, BlockState state, CollisionGetter level, BlockPos pos, Operation<VoxelShape> original
 	) {
 		VoxelShape blockShape = original.call(context, state, level, pos);
+		// Skyrim's shape is only in the mirror (not the Nether or any other dimension).
+		if (!dev.skycraft.SkyDimension.inMirror(level, context instanceof EntityCollisionContext ec ? ec.getEntity() : null)) {
+			return blockShape;
+		}
 		// The walls of holes dug into Skyrim's ground: solid for everyone.
 		if (state.isAir()) {
 			VoxelShape wall = dev.skycraft.world.SkyDig.wallShape(level, pos);

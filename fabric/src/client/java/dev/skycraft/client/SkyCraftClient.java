@@ -12,6 +12,7 @@ public final class SkyCraftClient implements ClientModInitializer {
 		dev.skycraft.link.SkyLink.announceRunning();
 		DiscordPresence.start();
 		DestructionToggle.register();
+		MinecraftView.init(); // /skyview: to the Nether (or any other dimension) and back, for testing the Minecraft view
 		// Multiplayer without editing files: the host opens their world to LAN (O, Open to LAN) and
 		// e4mc gives them a link; friends type /join <link> in chat, and /leave to come back.
 		net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback.EVENT.register((dispatcher, context) -> {
@@ -47,6 +48,26 @@ public final class SkyCraftClient implements ClientModInitializer {
 					System.getenv("SKYCRAFT_LAN_OFFLINE") != null ? ", offline logins allowed" : "");
 			});
 		});
+		// A guest in a friend's world places its own Skyrim's worlds where the host's world keeps them (SkySpace).
+		net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents.JOIN.register((handler, sender, minecraft) -> {
+			dev.skycraft.link.SkySpace.remoteWanted = minecraft.getSingleplayerServer() == null;
+		});
+		net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents.DISCONNECT.register((handler, minecraft) -> {
+			dev.skycraft.link.SkySpace.remoteWanted = false;
+			dev.skycraft.link.SkySpace.forgetRemote();
+		});
+		net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.registerGlobalReceiver(dev.skycraft.net.SkyNet.Spaces.TYPE, (payload, context) -> {
+			java.util.Map<Integer, Integer> spaces = new java.util.LinkedHashMap<>();
+			for (int i = 0; i < payload.worlds().size() && i < payload.spaces().size(); i++) {
+				spaces.put(payload.worlds().get(i), payload.spaces().get(i));
+			}
+			dev.skycraft.link.SkySpace.received(spaces);
+		});
+		dev.skycraft.link.SkySpace.setAsker(world -> net.minecraft.client.Minecraft.getInstance().execute(() -> {
+			if (net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.canSend(dev.skycraft.net.SkyNet.SpaceAsk.TYPE)) {
+				net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.send(new dev.skycraft.net.SkyNet.SpaceAsk(world));
+			}
+		}));
 		// A guest in a friend's world: dying there kills this player's own Skyrim character.
 		net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking.registerGlobalReceiver(dev.skycraft.net.SkyNet.Died.TYPE, (payload, context) -> {
 			if (dev.skycraft.link.SkyLink.active()) {

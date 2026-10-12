@@ -1,6 +1,7 @@
 #include "Collision.h"
 
 #include "Dig.h"
+#include "Strips.h"
 
 namespace skycraft
 {
@@ -11,6 +12,10 @@ namespace skycraft
 		constexpr int   kRadius = 5;          // regions around the player horizontally (arrows fly far)
 		constexpr int   kBelow = 3;           // regions below the player
 		constexpr int   kAbove = 2;           // regions above the player
+		// And straight over the player, further up: the land over a deep tunnel (Minecraft finds the
+		// ground and bedrock under it from that, however deep the player is when it starts looking).
+		constexpr int   kColumnAbove = 10;    // regions (80 blocks, past bedrock's depth)
+		constexpr int   kColumnRadius = 1;
 		constexpr int   kGrid = Collision::kRegionSize * 8;  // voxels per region edge (64)
 		constexpr auto  kRefreshNear = 1000ms;  // re-send regions next to the player this often (doors etc.)
 		constexpr auto  kFrameBudget = 2500us;
@@ -120,6 +125,32 @@ namespace skycraft
 			T value;
 			std::memcpy(&value, reinterpret_cast<const std::uint8_t*>(a_base) + a_offset, sizeof(T));
 			return value;
+		}
+
+		// Skyrim's shape for old strip collision (bhkNiTriStripsShape: the uprooted pine,
+		// landscape\trees\treepineforestuprooted01.nif, and older modded meshes) hands out every
+		// second triangle of a strip turned round (see Strips.h), so half its triangles would face
+		// into the solid, against kTriDiggable's promise. True for those. Its layout, from the
+		// game's getChildShape (1.7.104: 0x1410844A0) and getNextKey (0x141083F30), relative to its
+		// shape container: +0x90 the strip sets (16 bytes each, the NiTriStripsData first), +0x9C
+		// how many.
+		bool TurnedStripTriangle(const RE::hkpShapeContainer* a_container, RE::hkpShapeKey a_key)
+		{
+			static const std::uintptr_t stripsShape = RE::VTABLE_hkNiTriStripsShape[1].address();
+			if (!a_container || *reinterpret_cast<const std::uintptr_t*>(a_container) != stripsShape) {
+				return false;
+			}
+			const auto* sets = Field<const std::uint8_t*>(a_container, 0x90);
+			const auto  set = Strips::SetOf(a_key);
+			if (!sets || set >= Field<std::uint32_t>(a_container, 0x9C)) {
+				return false;
+			}
+			const auto* data = Field<const RE::NiTriStripsData*>(sets, std::size_t(set) * 16);
+			if (!data) {
+				return false;
+			}
+			const auto& strips = data->GetRuntimeData();
+			return strips.stripLengths && Strips::Turned(strips.stripLengths, strips.numStrips, Strips::TriangleOf(a_key));
 		}
 
 		bool IsStairHelper(RE::COL_LAYER a_layer) { return a_layer == RE::COL_LAYER::kStairHelper; }
@@ -239,6 +270,11 @@ namespace skycraft
 				for (int dy = -kBelow; dy <= kAbove; ++dy) {
 					offsets_.push_back({ dx, dy, dz });
 				}
+				if (std::abs(dx) <= kColumnRadius && std::abs(dz) <= kColumnRadius) {
+					for (int dy = kAbove + 1; dy <= kColumnAbove; ++dy) {
+						offsets_.push_back({ dx, dy, dz });
+					}
+				}
 			}
 		}
 		std::ranges::sort(offsets_, {}, [](const auto& o) { return o[0] * o[0] + o[2] * o[2] + o[1] * o[1] * 2; });
@@ -246,7 +282,7 @@ namespace skycraft
 		worker_.detach();
 	}
 
-	void Collision::Reset(std::uint32_t a_epoch)
+	void Collision::Reset(std::uint32_t a_epoch, std::uint32_t a_worldId)
 	{
 		epoch_ = a_epoch;
 		harvested_.clear();
@@ -255,6 +291,7 @@ namespace skycraft
 		Job job{};
 		job.clear = true;
 		job.epoch = a_epoch;
+		job.worldId = a_worldId;
 		queue_.push_back(std::move(job));
 		cv_.notify_one();
 	}
@@ -399,9 +436,18 @@ namespace skycraft
 			job.diggable = body.diggable;
 			job.terrain = body.terrain;
 			job.tree = body.tree;
+			const auto turnedBefore = job.turned;
 			if (!GuardedCall(collect, this, body.shape, body.xf, lo, hi, body.helper ? &helpers : &job)) {
 				if (loggedTypes_.insert(-1).second) {
 					logger::warn("collision: faulted reading a Havok shape (type {}); skipping it", static_cast<int>(body.shape->type));
+				}
+			}
+			if (job.turned != turnedBefore) {
+				static int logged = 0;
+				if (++logged <= 8) {
+					auto* base = body.ref ? body.ref->GetBaseObject() : nullptr;
+					logger::info("collision: turned {} strip triangles of {:08X} (base {:08X}) in region ({}, {}, {}) back to face out", job.turned - turnedBefore,
+						body.ref ? body.ref->GetFormID() : 0, base ? base->GetFormID() : 0, a_rx, a_ry, a_rz);
 				}
 			}
 		}
@@ -422,7 +468,7 @@ namespace skycraft
 		return proto::kTriDiggable | (a_job.terrain ? proto::kTriTerrain : 0) | (std::uint32_t(material) << proto::kTriMaterialShift);
 	}
 
-	void Collision::Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth, RE::hkpShapeKey a_key)
+	void Collision::Collect(const RE::hkpShape* a_shape, const float* a_xf, const float a_lo[3], const float a_hi[3], Job& a_job, int a_depth, RE::hkpShapeKey a_key, bool a_turned)
 	{
 		if (!a_shape || a_depth > 8 || a_job.tris.size() > 400000) {
 			return;
@@ -460,7 +506,8 @@ namespace skycraft
 				}
 				for (std::uint32_t i = 0; i < found; ++i) {
 					RE::hkpShapeBuffer buffer;
-					Collect(container->GetChildShape(keys[i], buffer), a_xf, a_lo, a_hi, a_job, a_depth + 1, a_depth == 0 ? keys[i] : a_key);
+					Collect(container->GetChildShape(keys[i], buffer), a_xf, a_lo, a_hi, a_job, a_depth + 1, a_depth == 0 ? keys[i] : a_key,
+						TurnedStripTriangle(container, keys[i]));
 				}
 				return;
 			}
@@ -488,7 +535,7 @@ namespace skycraft
 					float lo[3], hi[3];
 					HkAabbToMc(box, k, lo, hi);
 					if (Overlaps(lo, hi, a_lo, a_hi)) {
-						Collect(child, a_xf, a_lo, a_hi, a_job, a_depth + 1, a_depth == 0 ? key : a_key);
+						Collect(child, a_xf, a_lo, a_hi, a_job, a_depth + 1, a_depth == 0 ? key : a_key, TurnedStripTriangle(container, key));
 					}
 				}
 				return;
@@ -497,9 +544,15 @@ namespace skycraft
 			{
 				Tri tri{};
 				for (int v = 0; v < 3; ++v) {
-					float w[3];
-					XfPoint(a_xf, Vec(a_shape, 0x30 + v * 0x10), w);
+					// A strip triangle the game hands out turned round: its last two corners swapped
+					// back, so it faces out of the solid like its neighbours.
+					const int corner = a_turned && v > 0 ? 3 - v : v;
+					float     w[3];
+					XfPoint(a_xf, Vec(a_shape, 0x30 + corner * 0x10), w);
 					HkToMc(w, k, tri.v + v * 3);
+				}
+				if (a_turned) {
+					++a_job.turned;
 				}
 				if (Finite(tri.v, 9)) {
 					tri.flags = FlagsFor(a_job, a_key);
@@ -674,8 +727,10 @@ namespace skycraft
 						boxes_.clear();
 						++boxesGen_;
 					}
-					std::vector<std::uint8_t> payload(4);
+					// The epoch, and whose world it is (Minecraft keeps each Skyrim world in a space of its own).
+					std::vector<std::uint8_t> payload(8);
 					std::memcpy(payload.data(), &job.epoch, 4);
+					std::memcpy(payload.data() + 4, &job.worldId, 4);
 					Send(payload, proto::kColClear);
 				} else if (job.epoch == epoch_.load()) {
 					SendTriangles(job);

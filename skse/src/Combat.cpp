@@ -1,4 +1,10 @@
+#include "Breach.h"
+#include "Companion.h"
 #include "Game.h"
+#include "Loot.h"
+#include "WorldState.h"
+#include "Spawn.h"
+#include "Travel.h"
 
 namespace skycraft
 {
@@ -191,7 +197,8 @@ namespace skycraft
 				proto::ActorRecord r{};
 				r.formId = actor->GetFormID();
 				r.flags = (actor->IsHostileToActor(a_player) ? proto::kActorHostile : 0u) | (actor->IsDead() ? proto::kActorDead : 0u) |
-				          (actor->IsEssential() ? proto::kActorEssential : 0u) | (actor->IsInCombat() ? proto::kActorInCombat : 0u);
+				          (actor->IsEssential() ? proto::kActorEssential : 0u) | (actor->IsInCombat() ? proto::kActorInCombat : 0u) |
+				          (Spawn::IsOurs(actor) ? proto::kActorSpawned : 0u) | Companion::Flags(actor, a_player);
 				const auto mc = SkyToMc(pos);
 				r.x = static_cast<float>(mc.x);
 				r.y = static_cast<float>(mc.y);
@@ -206,6 +213,7 @@ namespace skycraft
 				if (const char* name = actor->GetDisplayFullName()) {
 					strncpy_s(r.name, name, _TRUNCATE);
 				}
+				r.vendor = actor->IsDead() ? 0 : WorldState::VendorMask(actor);
 				records.push_back(r);
 				if (records.size() >= proto::kMaxActors) {
 					break;
@@ -403,6 +411,7 @@ namespace skycraft
 				return;
 			}
 			logger::info("Minecraft player died (killer {:08X}); killing the Skyrim player", a_ev.formId);
+			View::BeforeKill(a_player);  // (died in another dimension: Skyrim's parked player had god mode)
 			SetEssential(a_player, false);
 			auto* killer = a_ev.formId ? RE::TESForm::LookupByID<RE::Actor>(a_ev.formId) : nullptr;
 			const float health = a_player->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth);
@@ -859,11 +868,27 @@ namespace skycraft
 				while (link.PopEvent(ev)) {
 					if (ev.type == proto::kEvPlayerDied && link.McAlive()) {
 						KillPlayer(a_player, ev);
+					} else if (ev.type == proto::kEvTakeItem) {
+						Loot::Take(a_player, ev.formId, static_cast<std::int32_t>(ev.a));  // Minecraft already gave the items
+					} else if (ev.type == proto::kEvSleep) {
+						WorldState::PassTime(ev.a);
+					} else if (ev.type == proto::kEvEnterDungeon) {
+						Breach::Enter(a_player, ev.formId);
+					} else if (ev.type == proto::kEvPortalTravel) {
+						Travel::Request(a_player, ev);  // checks the player's state itself
+					} else if (ev.type == proto::kEvCompanion) {
+						Companion::OnEvent(a_player, ev);  // a taming or an order sent just before Skyrim took the player
 					}
+					// kEvSpawnCreature is dropped: nothing comes out of the dark while Skyrim has the player.
+					// So is kEvActivate: a click from before Skyrim took the player activates nothing.
 				}
 				pendingExplosions.clear();
 				pendingFlings.clear();
 				link.WriteActors(nullptr, 0);
+				Spawn::Update(a_player, a_delta);
+				Breach::Update(a_player, a_delta);
+				Travel::Update(a_player, a_delta);
+				Companion::Update(a_player, a_delta);
 				return;
 			}
 			// Skyrim can't kill the player while Minecraft decides: one huge hit knocks them down
@@ -877,8 +902,12 @@ namespace skycraft
 			}
 
 			proto::McEvent ev;
+			bool           clickActivate = false;
 			while (link.PopEvent(ev)) {
 				switch (ev.type) {
+				case proto::kEvActivate:
+					clickActivate = true;
+					break;
 				case proto::kEvHitActor:
 					ApplyHit(a_player, ev);
 					break;
@@ -891,6 +920,24 @@ namespace skycraft
 				case proto::kEvArrowStuck:
 					WorldRender::StickArrow(ev.formId, ev.a, ev.b, ev.c, ev.d, std::bit_cast<float>(ev.flags));
 					break;
+				case proto::kEvTakeItem:
+					Loot::Take(a_player, ev.formId, static_cast<std::int32_t>(ev.a));
+					break;
+				case proto::kEvSleep:
+					WorldState::PassTime(ev.a);
+					break;
+				case proto::kEvSpawnCreature:
+					Spawn::OnEvent(a_player, ev);
+					break;
+				case proto::kEvEnterDungeon:
+					Breach::Enter(a_player, ev.formId);
+					break;
+				case proto::kEvPortalTravel:
+					Travel::Request(a_player, ev);
+					break;
+				case proto::kEvCompanion:
+					Companion::OnEvent(a_player, ev);
+					break;
 				case proto::kEvSkillUse:
 					if (ev.formId >= static_cast<std::uint32_t>(RE::ActorValue::kOneHanded) && ev.formId <= static_cast<std::uint32_t>(RE::ActorValue::kEnchanting)) {
 						TrainSkill(a_player, static_cast<RE::ActorValue>(ev.formId), ev.a);
@@ -900,7 +947,12 @@ namespace skycraft
 					break;
 				}
 			}
+			Input::UpdateClickActivate(clickActivate, a_delta);
 			UpdateFlings(a_delta);
+			Spawn::Update(a_player, a_delta);
+			Breach::Update(a_player, a_delta);
+			Travel::Update(a_player, a_delta);
+			Companion::Update(a_player, a_delta);
 			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
 				it->delay -= a_delta;
 				if (it->delay <= 0.0f) {

@@ -16,6 +16,8 @@ shared memory. Minecraft runs hidden in the background, and Skyrim draws everyth
 
 ## What works
 
+This fork adds looting, merchants, dungeon chests, time and sleep sync, deep creatures and Skyrim gear sets; see [docs/FEATURES.md](docs/FEATURES.md).
+
 - **Movement:** Minecraft movement on Skyrim's terrain and buildings. That covers walking,
   sprinting, jumping, crouching, swimming and falling, and Skyrim's collision is fed into
   Minecraft's own collision.
@@ -141,6 +143,12 @@ Minecraft has priority. These keys still go to Skyrim:
 
 Every other key is Minecraft's: **E** inventory, **F5** camera, **T** chat, **/** commands,
 **Shift** crouch/sneak, and so on.
+
+**Right click** is Minecraft's use button first: it places blocks, eats, draws bows, raises shields
+and trades with merchants (empty hand). When Minecraft has no use for a click (empty hand, a sword
+or pickaxe, nothing to place), it activates what Skyrim's crosshair is on, like **G**. Only a fresh
+click counts, so holding right click to draw a bow or block stays Minecraft's. Switch it off with
+`click_to_activate = off` in `config/skycraft-features.txt`.
 
 ## Known limitations
 

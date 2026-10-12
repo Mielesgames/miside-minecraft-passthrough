@@ -83,18 +83,94 @@ public final class SkyNet {
 		}
 	}
 
+	/**
+	 * Server -> client: where the host's world keeps each Skyrim world's blocks (SkySpace), as
+	 * {@code worlds[i]} has space {@code spaces[i]}. All of them on joining, then again whenever one is
+	 * added. A guest's client places its own Skyrim's worlds by it.
+	 */
+	public record Spaces(List<Integer> worlds, List<Integer> spaces) implements CustomPacketPayload {
+		public static final Type<Spaces> TYPE = new Type<>(Identifier.fromNamespaceAndPath(SkyCraft.MOD_ID, "spaces"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, Spaces> CODEC = StreamCodec.composite(
+			ByteBufCodecs.INT.apply(ByteBufCodecs.list(1 << 16)), Spaces::worlds,
+			ByteBufCodecs.VAR_INT.apply(ByteBufCodecs.list(1 << 16)), Spaces::spaces,
+			Spaces::new
+		);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
+	/** Client -> server: a guest's Skyrim is in a world the host's table doesn't have yet; give it a space. */
+	public record SpaceAsk(int world) implements CustomPacketPayload {
+		public static final Type<SpaceAsk> TYPE = new Type<>(Identifier.fromNamespaceAndPath(SkyCraft.MOD_ID, "space_ask"));
+		public static final StreamCodec<RegistryFriendlyByteBuf, SpaceAsk> CODEC = StreamCodec.composite(ByteBufCodecs.INT, SpaceAsk::world, SpaceAsk::new);
+
+		@Override
+		public Type<? extends CustomPacketPayload> type() {
+			return TYPE;
+		}
+	}
+
+	/** The host's world's spaces, for sending. */
+	public static Spaces spaces() {
+		var table = dev.skycraft.link.SkySpace.table();
+		List<Integer> worlds = new java.util.ArrayList<>(), spaces = new java.util.ArrayList<>();
+		if (table != null) {
+			table.all().forEach((world, space) -> {
+				worlds.add(world);
+				spaces.add(space);
+			});
+		}
+		return new Spaces(worlds, spaces);
+	}
+
+	/** Every player gets the spaces again (one was added). Server thread. */
+	public static void sendSpaces(net.minecraft.server.MinecraftServer server) {
+		Spaces payload = spaces();
+		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+			if (ServerPlayNetworking.canSend(player, Spaces.TYPE)) {
+				ServerPlayNetworking.send(player, payload);
+			}
+		}
+	}
+
 	public static void init() {
+		PayloadTypeRegistry.clientboundPlay().register(Spaces.TYPE, Spaces.CODEC);
+		PayloadTypeRegistry.serverboundPlay().register(SpaceAsk.TYPE, SpaceAsk.CODEC);
+		ServerPlayNetworking.registerGlobalReceiver(SpaceAsk.TYPE, (payload, context) -> context.server().execute(() -> {
+			if (payload.world() != 0 && dev.skycraft.link.SkySpace.table() != null) {
+				dev.skycraft.link.SkySpace.space(payload.world(), null); // a new one tells everyone (SkySpace onChange)
+				if (ServerPlayNetworking.canSend(context.player(), Spaces.TYPE)) {
+					ServerPlayNetworking.send(context.player(), spaces()); // and an old one this guest missed
+				}
+			}
+		}));
+		net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+			if (ServerPlayNetworking.canSend(handler.getPlayer(), Spaces.TYPE)) {
+				ServerPlayNetworking.send(handler.getPlayer(), spaces());
+			}
+		});
 		PayloadTypeRegistry.serverboundPlay().register(Hurt.TYPE, Hurt.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(DigOpen.TYPE, DigOpen.CODEC);
 		PayloadTypeRegistry.serverboundPlay().register(DigReveal.TYPE, DigReveal.CODEC);
 		ServerPlayNetworking.registerGlobalReceiver(DigOpen.TYPE, (payload, context) -> {
 			ServerPlayer player = context.player();
-			context.server().execute(() -> SkyDig.open(player, payload.world(), payload.pos(), payload.material()));
+			context.server().execute(() -> {
+				if (dev.skycraft.SkyDimension.inMirror(player)) {  // Skyrim's ground is only in the mirror
+					SkyDig.open(player, payload.world(), payload.pos(), payload.material());
+				}
+			});
 		});
 		ServerPlayNetworking.registerGlobalReceiver(DigReveal.TYPE, (payload, context) -> {
 			ServerPlayer player = context.player();
 			int[] materials = payload.materials().stream().mapToInt(Integer::intValue).toArray();
-			context.server().execute(() -> SkyDig.reveal(player, payload.world(), payload.cells(), materials));
+			context.server().execute(() -> {
+				if (dev.skycraft.SkyDimension.inMirror(player)) {
+					SkyDig.reveal(player, payload.world(), payload.cells(), materials);
+				}
+			});
 		});
 		PayloadTypeRegistry.clientboundPlay().register(Died.TYPE, Died.CODEC);
 		ServerPlayNetworking.registerGlobalReceiver(Hurt.TYPE, (payload, context) -> {

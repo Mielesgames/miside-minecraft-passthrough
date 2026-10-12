@@ -1,0 +1,13 @@
+{
+  "replace": false,
+  "values": [
+    "skycraft:whiterun_tundra",
+    "skycraft:falkreath_pines",
+    "skycraft:the_rift",
+    "skycraft:eastmarch_springs",
+    "skycraft:the_reach",
+    "skycraft:the_pale",
+    "skycraft:winterhold_peaks",
+    "skycraft:solstheim_ash"
+  ]
+}

@@ -13,7 +13,6 @@ import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRe
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
-import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
@@ -76,17 +75,39 @@ public final class SkyCombat {
 			removeAll();
 			return;
 		}
+		// Minecraft view: the host is away from the Skyrim mirror (the Nether, ...). Skyrim's world waits
+		// for them: no stand-ins, loot, item bridge, time, breaches or creatures until they're back.
+		if (!dev.skycraft.SkyDimension.inMirror(players.getFirst())) {
+			removeAll();
+			return;
+		}
 		ServerLevel level = players.getFirst().level();
+		dev.skycraft.trade.SkyTrade.tick(server.getTickCount());
 		for (ServerPlayer player : players) {
 			pickUpNearby(player);
+			if (dev.skycraft.net.SkyNet.isHost(player)) {
+				dev.skycraft.loot.SkyBridge.tick(player);
+				dev.skycraft.time.SkyTime.tick(server, player);
+				dev.skycraft.breach.SkyBreach.tick(server, player, players);
+			}
 		}
 		if (SkyLink.readActors(ACTORS)) {
+			dev.skycraft.loot.SkyLoot.onActors(level, ACTORS, server.getTickCount());
+			dev.skycraft.deep.SkyDeep.onActors(ACTORS);
+			dev.skycraft.companion.SkyCompanions.onActors(server, ACTORS, server.getTickCount());
 			sync(level);
+		}
+		for (ServerPlayer player : players) {
+			if (dev.skycraft.net.SkyNet.isHost(player)) {
+				dev.skycraft.deep.SkyDeep.tick(player, players, server.getTickCount());
+			}
 		}
 		// Hits land during the tick (melee, sweeps, arrows, fire); send one combined hit per actor.
 		for (SkyrimActorEntity proxy : PROXIES.values()) {
 			float[] hit = proxy.takeHit();
 			if (hit != null && (hit[0] > 0.0F || hit[3] > 0.0F)) {
+				dev.skycraft.loot.SkyLoot.recordHit(proxy.formId(), server.getTickCount());
+				dev.skycraft.companion.SkyCompanions.onHit(proxy.formId(), server.getTickCount());
 				SkyLink.pushEvent(
 					Proto.EV_HIT_ACTOR, proxy.formId(), hit[0], hit[1], hit[2], hit[3], Float.floatToRawIntBits(hit[4]), Float.floatToRawIntBits(hit[5])
 				);
@@ -116,17 +137,20 @@ public final class SkyCombat {
 			if (proxy == null) {
 				proxy = new SkyrimActorEntity(SKYRIM_ACTOR, level);
 				proxy.setFormId(a.formId());
+				proxy.setVendor(a.vendor());
+				proxy.setSkyFlags(a.flags());
 				proxy.setSize(a.width(), a.height());
 				proxy.snapTo(a.x(), a.y(), a.z(), a.yaw(), 0.0F);
-				if (!a.name().isEmpty()) {
-					proxy.setCustomName(Component.literal(a.name()));
-				}
+				proxy.setNames(a.name(), dev.skycraft.companion.SkyCompanions.displayName(a));
 				if (!level.addFreshEntity(proxy)) {
 					continue;
 				}
 				PROXIES.put(a.formId(), proxy);
 				continue;
 			}
+			proxy.setVendor(a.vendor());
+			proxy.setSkyFlags(a.flags());
+			proxy.setNames(a.name(), dev.skycraft.companion.SkyCompanions.displayName(a)); // "Meeko (tamed)" once it's the player's
 			proxy.setSize(a.width(), a.height());
 			proxy.setPos(a.x(), a.y(), a.z());
 			proxy.setYRot(a.yaw());
@@ -174,6 +198,11 @@ public final class SkyCombat {
 	}
 
 	private static void removeAll() {
+		dev.skycraft.loot.SkyLoot.reset();
+		dev.skycraft.time.SkyTime.reset();
+		dev.skycraft.deep.SkyDeep.reset();
+		dev.skycraft.breach.SkyBreach.reset();
+		dev.skycraft.companion.SkyCompanions.reset();
 		if (PROXIES.isEmpty()) {
 			return;
 		}
@@ -186,8 +215,8 @@ public final class SkyCombat {
 	 * {@code skyrimDamage} is what Skyrim would have taken off the player's health.
 	 */
 	public static void hurtPlayer(ServerPlayer player, int kind, float skyrimDamage, int attackerFormId, int flags) {
-		if (!player.isAlive() || skyrimDamage <= 0.0F) {
-			return;
+		if (!player.isAlive() || skyrimDamage <= 0.0F || !dev.skycraft.SkyDimension.inMirror(player)) {
+			return; // (Skyrim's player is parked while they're in another dimension: a late hit from before)
 		}
 		ServerLevel level = player.level();
 		SkyrimActorEntity attacker = PROXIES.get(attackerFormId);
@@ -232,6 +261,16 @@ public final class SkyCombat {
 			net.minecraft.world.entity.EquipmentSlot.LEGS, net.minecraft.world.entity.EquipmentSlot.FEET }) {
 			var stack = player.getItemBySlot(slot);
 			if (stack.isEmpty()) {
+				continue;
+			}
+			Boolean gearHeavy = dev.skycraft.gear.SkyGear.heavyArmor(stack.getItem());
+			if (gearHeavy != null) {
+				// Skyrim gear sets: Heavy or Light Armor as in Skyrim (elven and glass are light).
+				if (gearHeavy) {
+					heavy++;
+				} else {
+					light++;
+				}
 				continue;
 			}
 			String path = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath();

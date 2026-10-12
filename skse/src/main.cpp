@@ -1,5 +1,11 @@
+#include "Breach.h"
+#include "CoSave.h"
+#include "Companion.h"
 #include "Dig.h"
+#include "Loot.h"
 #include "Game.h"
+#include "Spawn.h"
+#include "Travel.h"
 
 namespace
 {
@@ -32,11 +38,16 @@ namespace
 			skycraft::WorldRender::Install();
 			skycraft::PathAvoid::Install();
 			skycraft::Dig::Install();
+			skycraft::Loot::Install();
 			skycraft::CrashLog::Install();
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 		case SKSE::MessagingInterface::kNewGame:
 			skycraft::Game::OnGameLoaded();
+			skycraft::Spawn::Reset();
+			skycraft::Companion::Reset();
+			skycraft::Breach::Reset();
+			skycraft::Travel::Reset();  // portal network
 			break;
 		default:
 			break;
@@ -49,7 +60,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	SKSE::Init(a_skse, { .trampoline = true, .trampolineSize = 1024 });
 	SetupLog();
 	skycraft::CrashLog::Install();
-	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
+	skycraft::CoSave::Install();  // co-save callbacks (deep creatures, companions) must be registered at plugin load
+	logger::info("SkyCraft {} loading (runtime {})", "0.1.2-dev11", a_skse->RuntimeVersion().string());
 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
 	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
 	skycraft::Launcher::StartMinecraft();

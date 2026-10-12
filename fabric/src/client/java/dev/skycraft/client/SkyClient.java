@@ -35,6 +35,11 @@ public final class SkyClient {
 	private static int lastTeleportSeq = -1;
 	private static int teleportAck;
 	private static boolean teleportPending;
+	// The Skyrim world and its space (SkySpace) at the last teleport: should that world's space turn out
+	// to be elsewhere (the world's table opened, or a guest heard it, after Skyrim put the player there),
+	// the player goes there.
+	private static int teleportedWorld;
+	private static int teleportedSpace = Integer.MIN_VALUE;
 	private static LocalPlayer lastPlayer;
 	private static Vec3 holdPos;
 	private static Vec3 unlinkedHold;
@@ -52,6 +57,11 @@ public final class SkyClient {
 
 	public static boolean linked() {
 		return linked;
+	}
+
+	/** True while the player is held still where Skyrim put them, waiting for Skyrim's ground there. */
+	static boolean holding() {
+		return holdPos != null;
 	}
 
 	/**
@@ -98,6 +108,7 @@ public final class SkyClient {
 				unlinkedHold = player != null ? player.position() : null;
 			}
 		}
+		MinecraftView.frame(Minecraft.getInstance(), linked);
 		if (!linked) {
 			return;
 		}
@@ -128,15 +139,39 @@ public final class SkyClient {
 			lastTeleportSeq = sky.teleportSeq;
 			teleportPending = true;
 		}
-		if (teleportPending && sky.inGame() && !sky.loading()) {
+		if (sky.worldId == teleportedWorld && sky.space != teleportedSpace && teleportedSpace != Integer.MIN_VALUE) {
+			SkyCraft.LOG.info("SkyCraft: Skyrim world {}'s blocks are in space {} (not {}); the player goes there", String.format("%08X", sky.worldId), sky.space,
+				teleportedSpace);
+			teleportedSpace = sky.space;
+			teleportPending = true;
+		}
+		// Minecraft view (MinecraftView): Skyrim moves nobody while the player is in another dimension.
+		// Back from one alive, Minecraft's position leads: the player waits here for Skyrim's ground,
+		// and Skyrim's latest teleport counts as done (Skyrim moves its own player here instead).
+		if (MinecraftView.away()) {
+			teleportPending = false;
+			holdPos = null;
+		} else if (MinecraftView.takeReturn()) {
+			teleportPending = false;
+			teleportAck = sky.teleportSeq;
+			teleportedWorld = sky.worldId;
+			teleportedSpace = sky.space;
+			holdPos = player.position();
+			SkyCraft.LOG.info("SkyCraft: back in the Skyrim mirror at {}; Skyrim's player follows", holdPos);
+		}
+		// (A guest waits until the host has said where this Skyrim world's blocks are: sky.space -1.)
+		if (teleportPending && sky.inGame() && !sky.loading() && sky.space >= 0) {
 			requestTeleport(minecraft, sky.x, sky.y, sky.z, sky.yaw, sky.pitch);
 			teleportAck = sky.teleportSeq;
 			teleportPending = false;
+			teleportedWorld = sky.worldId;
+			teleportedSpace = sky.space;
 			holdPos = new Vec3(sky.x, sky.y, sky.z);
 		}
 
 		// Look direction is driven by Skyrim (zero-latency camera); MC uses it for everything else.
-		if (minecraft.gui.screen() == null) {
+		// In another dimension Minecraft turns the player itself (InputBridge, Proto.IN_LOOK).
+		if (minecraft.gui.screen() == null && !MinecraftView.away()) {
 			player.setYRot(sky.yaw);
 			player.setXRot(sky.pitch);
 			player.yRotO = sky.yaw;
@@ -185,9 +220,14 @@ public final class SkyClient {
 	public static void clientTick(Minecraft minecraft) {
 		MirrorWorld.tick(minecraft);
 		DiscordPresence.tick(minecraft);
-		SkyDigClient.tick(minecraft);
+		if (MinecraftView.away()) {
+			dev.skycraft.world.SkyDig.clientDug = null; // no Skyrim ground to dig in another dimension
+		} else {
+			SkyDigClient.tick(minecraft);
+		}
 		freezeWhileUnlinked(minecraft);
 		holdUntilReady(minecraft);
+		FallGuard.tick(minecraft);
 		publishTick(minecraft);
 	}
 
@@ -198,7 +238,7 @@ public final class SkyClient {
 	 */
 	private static void freezeWhileUnlinked(Minecraft minecraft) {
 		LocalPlayer player = minecraft.player;
-		if (linked || !tookOver || player == null) {
+		if (linked || !tookOver || player == null || MinecraftView.away()) {
 			return;
 		}
 		if (unlinkedHold == null) {
@@ -250,13 +290,14 @@ public final class SkyClient {
 		mc.walkDist = bob ? avatar.getInterpolatedWalkDistance(1.0F) : 0.0F;
 		mc.bobO = bob ? avatar.getInterpolatedBob(0.0F) : 0.0F;
 		mc.bob = bob ? avatar.getInterpolatedBob(1.0F) : 0.0F;
+		mc.inMirror = dev.skycraft.SkyDimension.inMirror(minecraft.level);
 		SkyLink.writeMcState(mc);
 	}
 
 	/** Freeze the player until Skyrim's collision around them has arrived. */
 	private static void holdUntilReady(Minecraft minecraft) {
 		LocalPlayer player = minecraft.player;
-		if (!linked || player == null) {
+		if (!linked || player == null || MinecraftView.away()) {
 			return;
 		}
 		if (!sky.inGame() || sky.loading()) {
@@ -286,6 +327,12 @@ public final class SkyClient {
 				player.setPos(safe.x, safe.y, safe.z);
 				player.yo = safe.y;
 				SkyCraft.LOG.info("SkyCraft: lifted player {} blocks out of the ground", String.format("%.3f", safe.y - holdPos.y));
+			}
+			// Skyrim can put the player inside a rock or blocks (where its own rescue puts them back on
+			// the land, say), or over a hole: the nearest open spot with ground instead.
+			Vec3 open = FallGuard.arrival(minecraft, player, safe);
+			if (!open.equals(safe)) {
+				FallGuard.moveTo(minecraft, open.x, open.y, open.z);
 			}
 			holdPos = null;
 			return;
@@ -380,7 +427,13 @@ public final class SkyClient {
 		if (minecraft.gui.screen() != null) {
 			flags |= Proto.MC_SCREEN_OPEN;
 		}
+		boolean away = MinecraftView.away();
+		if (MinecraftView.reportAway()) {
+			flags |= Proto.MC_OTHER_DIMENSION; // Minecraft view: Skyrim parks its player and shows this frame
+		}
 		mc.flags = flags;
+		// Positions go to Skyrim in its world's terms, unless they're another dimension's (SkySpace).
+		mc.inMirror = dev.skycraft.SkyDimension.inMirror(minecraft.level);
 		mc.sensitivity = minecraft.options.sensitivity().get().floatValue();
 		mc.teleportAck = holdPos == null ? teleportAck : teleportAck - 1; // not "arrived" until we are released
 		mc.guiScale = minecraft.getWindow().getGuiScale();
@@ -389,13 +442,15 @@ public final class SkyClient {
 
 		if ((flags & Proto.MC_IN_WORLD) != 0) {
 			try {
-				WorldExporter.frame(minecraft, minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false));
+				if (!away) { // another dimension's blocks aren't Skyrim's to draw
+					WorldExporter.frame(minecraft, minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false));
+				}
 			} catch (RuntimeException e) {
 				if (exporterErrors++ < 5) {
 					SkyCraft.LOG.error("SkyCraft: world export failed", e);
 				}
 			}
-			FrameExporter.capture(minecraft);
+			FrameExporter.capture(minecraft, away);
 		}
 	}
 
@@ -419,6 +474,11 @@ public final class SkyClient {
 		int seqNow = SkyLink.skyStateSeq() >>> 1;
 		skyrimStalled = seqNow == lastPacedSeq;
 		lastPacedSeq = seqNow;
+	}
+
+	/** Skyrim's frames stopped coming (a menu that pauses it, Alt-Tab): Minecraft isn't paced by them now. */
+	static boolean skyrimStalled() {
+		return skyrimStalled;
 	}
 
 	private static void applyLinkedOptions() {
@@ -453,6 +513,12 @@ public final class SkyClient {
 	private static void applyViewportSize(Minecraft minecraft) {
 		int w = Math.min(sky.viewportW, Proto.MAX_OVERLAY_W);
 		int h = Math.min(sky.viewportH, Proto.MAX_OVERLAY_H);
+		if (w > 0 && h > 0 && MinecraftView.away()) {
+			// Minecraft view: its whole world, at no more than MinecraftView's cap (Skyrim scales it up).
+			int[] capped = MinecraftView.viewport(w, h);
+			w = capped[0];
+			h = capped[1];
+		}
 		if (w <= 0 || h <= 0 || (w == appliedViewportW && h == appliedViewportH)) {
 			return;
 		}

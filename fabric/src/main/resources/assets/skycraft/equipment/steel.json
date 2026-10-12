@@ -1,0 +1,14 @@
+{
+  "layers": {
+    "humanoid": [
+      {
+        "texture": "skycraft:steel"
+      }
+    ],
+    "humanoid_leggings": [
+      {
+        "texture": "skycraft:steel"
+      }
+    ]
+  }
+}

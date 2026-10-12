@@ -33,7 +33,8 @@ public abstract class ServerExplosionMixin {
 
 	@Inject(method = "explode", at = @At("HEAD"))
 	private void skycraft$begin(CallbackInfoReturnable<Integer> cir) {
-		this.skycraft$blast = SkyDigBlast.begin((ServerExplosion) (Object) this);
+		ServerExplosion self = (ServerExplosion) (Object) this;
+		this.skycraft$blast = dev.skycraft.SkyDimension.inMirror(self.level()) ? SkyDigBlast.begin(self) : null;
 	}
 
 	@WrapOperation(
@@ -66,11 +67,11 @@ public abstract class ServerExplosionMixin {
 			this.skycraft$blast.finish();
 			this.skycraft$blast = null;
 		}
-		if (!SkyLink.active()) {
+		ServerExplosion self = (ServerExplosion) (Object) this;
+		if (!SkyLink.active() || !dev.skycraft.SkyDimension.inMirror(self.level())) {
 			return;
 		}
-		ServerExplosion self = (ServerExplosion) (Object) this;
 		var center = self.center();
-		SkyLink.pushEvent(Proto.EV_EXPLOSION, 0, (float) center.x, (float) center.y, (float) center.z, self.radius(), 0);
+		SkyLink.pushEventAt(Proto.EV_EXPLOSION, 0, center.x, center.y, center.z, self.radius(), 0, 0);
 	}
 }
