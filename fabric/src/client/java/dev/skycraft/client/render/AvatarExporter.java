@@ -144,7 +144,9 @@ final class AvatarExporter implements SubmitNodeCollector {
 		this.atlas = atlas;
 		var player = minecraft.player;
 		Camera camera = minecraft.gameRenderer.mainCamera();
-		if (player == null || !camera.isDetached()) {
+		// Also in first person: a mirror of the host's shows Steve (the host leaves the body out of
+		// its own camera's picture then).
+		if (player == null) {
 			this.sendEmpty(Proto.REN_AVATAR, false);
 			return;
 		}

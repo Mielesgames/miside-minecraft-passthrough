@@ -116,6 +116,12 @@ public class SkyrimActorEntity extends LivingEntity {
 		this.hitThisTick = true;
 	}
 
+	/** A sword's sweep started on us this tick (PlayerSweepMixin). */
+	public void markSweep() {
+		this.pendingFlags |= Proto.HIT_SWEEP;
+		this.hitThisTick = true;
+	}
+
 	/** Player.crit() was called on us this tick. */
 	public void markCritical() {
 		this.pendingFlags |= Proto.HIT_CRITICAL;

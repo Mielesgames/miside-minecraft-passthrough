@@ -6,6 +6,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <atomic>
 
 namespace input
 {
@@ -35,6 +36,10 @@ namespace input
         int g_plain_moves = 0;
         ULONGLONG g_last_raw_tick = 0;
         ULONGLONG g_last_report_tick = 0;
+
+        // Raw mouse movement outside Minecraft's screens, for the host's own look (take_look).
+        std::atomic<int> g_look_dx{ 0 };
+        std::atomic<int> g_look_dy{ 0 };
 
         // Virtual key -> SDL scancode (USB HID usage), which is what Minecraft
         // takes. 0: not sent to Minecraft.
@@ -276,6 +281,20 @@ namespace input
 
                 if (!g_screen_open)
                 {
+                    // The game sees it too; its look is the host's to steer with this.
+                    RAWINPUT look{};
+                    UINT look_size = sizeof(look);
+
+                    if (
+                        ::GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_INPUT, &look, &look_size, sizeof(RAWINPUTHEADER)) != static_cast<UINT>(-1) &&
+                        look.header.dwType == RIM_TYPEMOUSE &&
+                        (look.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0
+                    )
+                    {
+                        g_look_dx += look.data.mouse.lLastX;
+                        g_look_dy += look.data.mouse.lLastY;
+                    }
+
                     return false;
                 }
 
@@ -473,6 +492,12 @@ namespace input
         g_attack_pending = false;
 
         return pending;
+    }
+
+    void take_look(int& dx, int& dy)
+    {
+        dx = g_look_dx.exchange(0);
+        dy = g_look_dy.exchange(0);
     }
 
     bool grab_held()

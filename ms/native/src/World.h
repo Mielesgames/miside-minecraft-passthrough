@@ -5,6 +5,7 @@
 #include <d3d11.h>
 
 #include <array>
+#include <cstdint>
 #include <vector>
 
 // Draws Minecraft's blocks inside MiSide's picture. Minecraft sends
@@ -74,6 +75,24 @@ namespace world
     // slabs) that touch the given box, as {minx, miny, minz, maxx, maxy,
     // maxz} in blocks, appended to `out`. Any thread.
     void shapes_in(const double low[3], const double high[3], std::vector<std::array<float, 6>>& out);
+
+    // Drawing inside the game's own rendering (from a command buffer on its camera, on the render
+    // thread): the blocks go into what the game is drawing, against its own depth buffer, so its
+    // walls hide them exactly and what it draws later (glass, effects, letters) goes over them.
+    // `position` is the camera (host units) and `to_clip` its matrix from camera-relative host
+    // units to clip space (row-major), both of the frame being drawn.
+    struct SceneView
+    {
+        double position[3];
+        float to_clip[16];
+        // Draw the player's own body (third person, or a mirror's camera).
+        std::int32_t draw_avatar;
+        std::int32_t pad;
+    };
+
+    // `depth_only`: into the game's depth texture (no colour), so what it draws by that texture
+    // (outlines, effects) knows the blocks are there too.
+    void draw_scene(const SceneView& view, bool depth_only);
 
     // Lets go of the game's device context again.
     // Holes in the game's world (Minecraft's inverted blocks): its geometry

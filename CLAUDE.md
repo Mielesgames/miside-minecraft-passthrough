@@ -89,3 +89,14 @@ Emiel (GitHub Mielesgames). Nederlands of Engels, korte uitleg zonder jargon. **
   - loot-kisten (`kInLootChest`);
   - MiSide's achievements (`GameAchievements` wacht op de host);
   - deuren meteen opnieuw scannen.
+
+## Wensen (nog niet gebouwd)
+- **Mita overnemen, zoals spectator mobs overneemt** (wens 28 okt). In spectator mode op Mita klikken = je bent Mita.
+  - Steve verbergen.
+  - Een first-person camera in Mita's hoofd.
+  - Haar bewegen zoals de speler loopt.
+  - Slaan doet dan niets; haar eigen physics (haar, kleding) gewoon laten werken.
+  - Haar "naar de speler kijken" (Character_Look / LookAtIK) uitzetten, anders draait ze steeds haar hoofd naar het midden van het beeld, want de speler staat op haar plek.
+  - Haar hoofd niet tekenen (`MitaPerson.meshHead`, of het hoofdbot heel klein schalen), anders zit de camera erin. Haar haar wel tekenen als dat een los onderdeel is.
+  - Ook genoteerd voor de Security Breach-mod.
+

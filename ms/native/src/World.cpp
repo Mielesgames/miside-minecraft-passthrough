@@ -107,6 +107,20 @@ VSOut VSMain(VSIn i) {
     o.viewZ = o.pos.w;
     return o;
 }
+// Inside the game's own rendering (draw_scene): the game's own camera matrix, from coordinates
+// relative to the camera (as VSMain takes them) straight to its clip space and depth.
+cbuffer Scene : register(b2) { row_major float4x4 toClip; };
+VSOut VSScene(VSIn i) {
+    VSOut o;
+    float3 rel = offset.xyz + float3(i.pos.x, i.pos.z, i.pos.y) * 70.0;
+    o.pos = mul(toClip, float4(rel, 1));
+    o.uv = i.uv;
+    o.color = i.color;
+    o.light = float2(i.light & 0xFF, (i.light >> 8) & 0xFF) / 15.0;
+    o.flags = i.flags;
+    o.viewZ = o.pos.w;
+    return o;
+}
 // Minecraft's fixed shading per face, by Direction ordinal + 1 (0: none).
 static const float kFaceShade[8] = { 1.0, 0.5, 1.0, 0.8, 0.8, 0.6, 0.6, 1.0 };
 bool HiddenByGame(float2 pixel, float d, float viewZ, float surfaceZ);
@@ -410,6 +424,14 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
         UINT g_atlas_h = 0;
 
         ID3D11VertexShader* g_vs = nullptr;
+        // Drawing inside the game's rendering (draw_scene).
+        ID3D11VertexShader* g_vs_scene = nullptr;
+        ID3D11Buffer* g_scene_constants = nullptr;
+        ID3D11Device* g_seen_device = nullptr;
+        // Whether the passes draw the player's body: always over the finished picture (it is only
+        // sent in third person there), as the scene's camera asks inside the game's rendering.
+        bool g_draw_avatar = true;
+        std::atomic<ULONGLONG> g_scene_drawn_tick{ 0 };
         ID3D11PixelShader* g_ps = nullptr;
         ID3D11InputLayout* g_layout = nullptr;
         ID3D11Buffer* g_constants = nullptr;
@@ -522,6 +544,23 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
             }
 
             device->CreateVertexShader(vs_blob->GetBufferPointer(), vs_blob->GetBufferSize(), nullptr, &g_vs);
+
+            {
+                ID3DBlob* scene_blob = nullptr;
+
+                if (compile("VSScene", "vs_5_0", &scene_blob))
+                {
+                    device->CreateVertexShader(scene_blob->GetBufferPointer(), scene_blob->GetBufferSize(), nullptr, &g_vs_scene);
+                    safe_release(scene_blob);
+                }
+
+                D3D11_BUFFER_DESC sbd{};
+                sbd.ByteWidth = 64;
+                sbd.Usage = D3D11_USAGE_DYNAMIC;
+                sbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                sbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+                device->CreateBuffer(&sbd, nullptr, &g_scene_constants);
+            }
             device->CreatePixelShader(ps_blob->GetBufferPointer(), ps_blob->GetBufferSize(), nullptr, &g_ps);
 
             const D3D11_INPUT_ELEMENT_DESC elements[] = {
@@ -1940,7 +1979,10 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
             }
 
             draw_batches(context, camera, frame, translucent, g_scene_batches, g_scene_vb, g_scene_origin);
-            draw_batches(context, camera, frame, translucent, g_avatar_batches, g_avatar_vb, player);
+            if (g_draw_avatar)
+            {
+                draw_batches(context, camera, frame, translucent, g_avatar_batches, g_avatar_vb, player);
+            }
         }
     }
 
@@ -2380,6 +2422,7 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
     {
         g_back_w = width;
         g_back_h = height;
+        g_seen_device = device;
 
         if (!init(device))
         {
@@ -2408,6 +2451,12 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
             {
                 light_up(context, target, width, height, lit, !night_vision);
             }
+        }
+
+        // Drawn inside the game's own rendering this frame already (draw_scene): not again on top.
+        if (::GetTickCount64() - g_scene_drawn_tick.load(std::memory_order_relaxed) < 250)
+        {
+            return;
         }
 
         if (
@@ -2509,6 +2558,228 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
         // The game binds its depth buffer for writing again next frame.
         ID3D11ShaderResourceView* none = nullptr;
         context->PSSetShaderResources(1, 1, &none);
+    }
+
+    void draw_scene(const SceneView& view, bool depth_only)
+    {
+        ID3D11Device* device = g_seen_device;
+
+        if (device == nullptr || !g_init_ok || g_vs_scene == nullptr || g_scene_constants == nullptr || g_atlas_srv == nullptr)
+        {
+            return;
+        }
+
+        if (
+            g_sections.empty() && g_scene_batches.empty() && g_avatar_batches.empty() &&
+            g_entities.count == 0 && g_entities.hasSelection == 0
+        )
+        {
+            g_scene_drawn_tick.store(::GetTickCount64(), std::memory_order_relaxed);
+            return;
+        }
+
+        ID3D11DeviceContext* context = nullptr;
+        device->GetImmediateContext(&context);
+
+        if (context == nullptr)
+        {
+            return;
+        }
+
+        // Where the game is drawing right now: its camera's colour and depth.
+        ID3D11RenderTargetView* target = nullptr;
+        ID3D11DepthStencilView* depth = nullptr;
+        context->OMGetRenderTargets(1, &target, &depth);
+
+        if ((target != nullptr || depth_only) && depth != nullptr)
+        {
+            // The size of what is drawn into: the colour target, or else the depth buffer.
+            ID3D11Resource* resource = nullptr;
+            if (target != nullptr)
+            {
+                target->GetResource(&resource);
+            }
+            else
+            {
+                depth->GetResource(&resource);
+            }
+            ID3D11Texture2D* texture = nullptr;
+            D3D11_TEXTURE2D_DESC desc{};
+
+            if (resource != nullptr && SUCCEEDED(resource->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&texture))))
+            {
+                texture->GetDesc(&desc);
+                texture->Release();
+            }
+
+            safe_release(resource);
+
+            // What the game had bound, put back afterwards.
+            ID3D11InputLayout* old_layout = nullptr;
+            D3D11_PRIMITIVE_TOPOLOGY old_topology{};
+            ID3D11VertexShader* old_vs = nullptr;
+            ID3D11PixelShader* old_ps = nullptr;
+            ID3D11Buffer* old_vs_cb[3]{};
+            ID3D11Buffer* old_ps_cb[2]{};
+            ID3D11ShaderResourceView* old_srv[2]{};
+            ID3D11SamplerState* old_sampler = nullptr;
+            ID3D11RasterizerState* old_raster = nullptr;
+            ID3D11BlendState* old_blend = nullptr;
+            float old_factor[4]{};
+            UINT old_mask = 0;
+            ID3D11DepthStencilState* old_depth_state = nullptr;
+            UINT old_ref = 0;
+            UINT viewports = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+            D3D11_VIEWPORT old_viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
+            ID3D11Buffer* old_vb = nullptr;
+            UINT old_stride = 0;
+            UINT old_offset = 0;
+
+            context->IAGetInputLayout(&old_layout);
+            context->IAGetPrimitiveTopology(&old_topology);
+            context->IAGetVertexBuffers(0, 1, &old_vb, &old_stride, &old_offset);
+            context->VSGetShader(&old_vs, nullptr, nullptr);
+            context->PSGetShader(&old_ps, nullptr, nullptr);
+            context->VSGetConstantBuffers(0, 3, old_vs_cb);
+            context->PSGetConstantBuffers(0, 2, old_ps_cb);
+            context->PSGetShaderResources(0, 2, old_srv);
+            context->PSGetSamplers(0, 1, &old_sampler);
+            context->RSGetState(&old_raster);
+            context->RSGetViewports(&viewports, old_viewports);
+            context->OMGetBlendState(&old_blend, old_factor, &old_mask);
+            context->OMGetDepthStencilState(&old_depth_state, &old_ref);
+
+            Camera camera;
+
+            {
+                std::scoped_lock lock(g_camera_mutex);
+
+                camera = g_camera;
+            }
+
+            // This frame's camera, as the game draws it (not the newest one the game thread set).
+            for (int i = 0; i < 3; ++i)
+            {
+                camera.position[i] = view.position[i];
+            }
+
+            camera.valid = true;
+
+            if (!depth_only)
+            {
+                build_dynamic(device, context, camera);
+            }
+
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+
+            if (SUCCEEDED(context->Map(g_scene_constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            {
+                std::memcpy(mapped.pData, view.to_clip, sizeof(view.to_clip));
+                context->Unmap(g_scene_constants, 0);
+            }
+
+            Constants frame{};
+            frame.depth[3] = g_night_vision.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
+            g_draw_avatar = view.draw_avatar != 0 && !depth_only;
+
+            const D3D11_VIEWPORT vp{ 0, 0, float(desc.Width), float(desc.Height), 0, 1 };
+            const float factor[4]{};
+
+            context->RSSetState(g_raster);
+            context->RSSetViewports(1, &vp);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context->IASetInputLayout(g_layout);
+            context->VSSetShader(g_vs_scene, nullptr, 0);
+            context->VSSetConstantBuffers(0, 1, &g_constants);
+            context->VSSetConstantBuffers(2, 1, &g_scene_constants);
+            context->PSSetShader(g_ps, nullptr, 0);
+            context->PSSetConstantBuffers(0, 1, &g_constants);
+            context->PSSetSamplers(0, 1, &g_sampler);
+
+            ID3D11ShaderResourceView* no_depth = nullptr;
+            context->PSSetShaderResources(1, 1, &no_depth);
+
+            if (g_light_constants != nullptr)
+            {
+                if (SUCCEEDED(context->Map(g_light_constants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+                {
+                    std::memset(mapped.pData, 0, sizeof(LightConstants));
+                    context->Unmap(g_light_constants, 0);
+                }
+
+                context->PSSetConstantBuffers(1, 1, &g_light_constants);
+            }
+
+            // The game's own depth buffer: its walls hide the blocks exactly, and what it draws
+            // after (glass, effects, the dialogue's letters) goes over them.
+            context->OMSetBlendState(g_blend_off, factor, 0xFFFFFFFF);
+            context->OMSetDepthStencilState(g_depth_write, 0);
+            draw_pass(context, camera, frame, false);
+            draw_dynamic(context, camera, frame, 0, g_dynamic_solid);
+
+            if (!depth_only)
+            {
+                context->OMSetBlendState(g_blend_alpha, factor, 0xFFFFFFFF);
+                context->OMSetDepthStencilState(g_depth_read, 0);
+                draw_pass(context, camera, frame, true);
+                draw_dynamic(context, camera, frame, g_dynamic_solid, g_dynamic_cracks);
+
+                if (g_dynamic_lines != 0)
+                {
+                    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+                    draw_dynamic(context, camera, frame, g_dynamic_solid + g_dynamic_cracks, g_dynamic_lines);
+                }
+            }
+
+            context->IASetInputLayout(old_layout);
+            context->IASetPrimitiveTopology(old_topology);
+            context->IASetVertexBuffers(0, 1, &old_vb, &old_stride, &old_offset);
+            context->VSSetShader(old_vs, nullptr, 0);
+            context->PSSetShader(old_ps, nullptr, 0);
+            context->VSSetConstantBuffers(0, 3, old_vs_cb);
+            context->PSSetConstantBuffers(0, 2, old_ps_cb);
+            context->PSSetShaderResources(0, 2, old_srv);
+            context->PSSetSamplers(0, 1, &old_sampler);
+            context->RSSetState(old_raster);
+            context->RSSetViewports(viewports, old_viewports);
+            context->OMSetBlendState(old_blend, old_factor, old_mask);
+            context->OMSetDepthStencilState(old_depth_state, old_ref);
+
+            safe_release(old_layout);
+            safe_release(old_vb);
+            safe_release(old_vs);
+            safe_release(old_ps);
+
+            for (auto*& buffer : old_vs_cb)
+            {
+                safe_release(buffer);
+            }
+
+            for (auto*& buffer : old_ps_cb)
+            {
+                safe_release(buffer);
+            }
+
+            for (auto*& srv : old_srv)
+            {
+                safe_release(srv);
+            }
+
+            safe_release(old_sampler);
+            safe_release(old_raster);
+            safe_release(old_blend);
+            safe_release(old_depth_state);
+
+            g_draw_avatar = true;
+            if (!depth_only && view.draw_avatar != 2)
+            {
+                g_scene_drawn_tick.store(::GetTickCount64(), std::memory_order_relaxed);
+            }
+        }
+
+        safe_release(target);
+        safe_release(depth);
+        context->Release();
     }
 
     void set_capture_wanted(bool wanted)

@@ -83,6 +83,7 @@ internal static class Native
     [DllImport(Dll)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool msc_take_attack_click();
     [DllImport(Dll)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool msc_attack_held();
     [DllImport(Dll)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool msc_grab_held();
+    [DllImport(Dll)] public static extern void msc_take_look(out int dx, out int dy);
 
     [DllImport(Dll)]
     public static extern void msc_overlay_set([MarshalAs(UnmanagedType.I1)] bool show, [MarshalAs(UnmanagedType.I1)] bool crosshair,
@@ -95,6 +96,7 @@ internal static class Native
         float[] right, float[] up, float tanHalfFov);
     [DllImport(Dll)] public static extern void msc_set_player_position(double x, double y, double z);
     [DllImport(Dll)] public static extern void msc_set_near_plane(float hostUnits);
+    [DllImport(Dll)] public static extern IntPtr msc_scene_event();
     [DllImport(Dll)] public static extern void msc_set_night_vision([MarshalAs(UnmanagedType.I1)] bool on);
     [DllImport(Dll)] [return: MarshalAs(UnmanagedType.I1)] public static extern bool msc_solid_at(int x, int y, int z);
 
@@ -121,6 +123,8 @@ internal static class Proto
     public const uint McCreative = 1u << 10;
     public const uint McPauseMenu = 1u << 23;
     public const uint McHoldsBucket = 1u << 17;
+    public const uint McHiding = 1u << 16;
+    public const uint McHandEmpty = 1u << 28;
 
     public const uint ColClear = 1;
     public const uint ColRegionMsg = 2;

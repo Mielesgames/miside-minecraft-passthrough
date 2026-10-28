@@ -35,6 +35,10 @@ namespace input
     // The left button is down outside a Minecraft screen: Steve keeps hacking.
     bool attack_held();
 
+    // Raw mouse movement (counts) outside Minecraft's screens since the last call: the host turns
+    // its camera with it while Minecraft drives. Any thread.
+    void take_look(int& dx, int& dy);
+
     // The middle button is down outside a Minecraft screen (creative: grab).
     bool grab_held();
 

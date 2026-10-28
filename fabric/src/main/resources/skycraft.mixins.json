@@ -5,6 +5,7 @@
   "mixins": [
     "AbstractArrowMixin",
     "PlayerCrawlMixin",
+    "PlayerSweepMixin",
     "BlockCollisionsMixin",
     "BlockStateBaseMixin",
     "EntityFluidInteractionMixin",

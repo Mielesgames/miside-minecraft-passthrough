@@ -23,7 +23,7 @@ internal static class Units
     public static Vector3 DirToMc(Vector3 unity) => new(unity.x, unity.y, -unity.z);
 
     // Minecraft's yaw 0 looks south (+z, which is Unity's -z): Unity's yaw is half a turn off.
-    public static float YawToMc(float unityYaw) => Mathf.Repeat(unityYaw + 180f, 360f) - 180f;
+    public static float YawToMc(float unityYaw) => Mathf.DeltaAngle(0f, unityYaw + 180f);
     public static float YawFromMc(float mcYaw) => mcYaw - 180f;
 
     public static double[] HostPosition(Vector3 unity)

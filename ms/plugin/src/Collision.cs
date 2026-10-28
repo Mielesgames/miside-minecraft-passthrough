@@ -85,6 +85,20 @@ internal static class Collision
         Plugin.Say($"collision: player layer {LayerMask.LayerToName(playerLayer)}, castMove {castMove:X}");
     }
 
+    // Does this collider of MiSide's stop the player (its layer, or it is a door)?
+    public static bool Blocks(Collider collider)
+    {
+        return !collider.isTrigger && (IsDoor(collider) || Blocks(collider.gameObject.layer));
+    }
+
+    // Part of a door's swinging leaf (on its rigidbody): not the frame, not the helpers around it.
+    public static bool IsDoor(Collider collider)
+    {
+        var door = collider.GetComponentInParent<ObjectDoor>();
+        var body = collider.attachedRigidbody;
+        return door != null && body != null && (door.rb == null || door.rb == body);
+    }
+
     private static bool Blocks(int layer)
     {
         return (castMove & (1 << layer)) != 0 || !Physics.GetIgnoreLayerCollision(playerLayer, layer);
@@ -233,7 +247,15 @@ internal static class Collision
                     continue;
                 }
 
-                if (!Blocks(collider.gameObject.layer))
+                // MiSide's doors are walls whatever layer they are on (the player swings them by
+                // walking into them; Steve can't, so to him they are shut until opened).
+                bool door = IsDoor(collider);
+                if (door)
+                {
+                    Count($"door {collider.gameObject.name} ({LayerMask.LayerToName(collider.gameObject.layer)})");
+                }
+
+                if (!door && !Blocks(collider.gameObject.layer))
                 {
                     Count($"layer {LayerMask.LayerToName(collider.gameObject.layer)}");
                     continue;
@@ -248,7 +270,7 @@ internal static class Collision
 
                 // Things that move by physics (cups, balls) aren't walls; doors are, even swinging.
                 var body = collider.attachedRigidbody;
-                if (body != null && !body.isKinematic && collider.GetComponentInParent<ObjectDoor>() == null)
+                if (body != null && !body.isKinematic && !door)
                 {
                     Count($"physics {collider.gameObject.name}");
                     continue;
@@ -290,6 +312,10 @@ internal static class Collision
                 }
             }
         }
+
+        // Minecraft's mobs (and its own block collision) go by 1/8-block voxels, not triangles: the
+        // same surfaces as voxels too, or the mobs fall through MiSide's floors.
+        Voxelize(tris, minX, minY, minZ, maxX, maxY, maxZ, blocks);
 
         var header = new Proto.ColRegion
         {
@@ -452,44 +478,63 @@ internal static class Collision
         // On the grid of the whole world, so neighbouring regions line up.
         int u0 = Mathf.FloorToInt(min[u] / ProbeStep), u1 = Mathf.FloorToInt(max[u] / ProbeStep);
         int v0 = Mathf.FloorToInt(min[v] / ProbeStep), v1 = Mathf.FloorToInt(max[v] / ProbeStep);
-        var hits = new List<float>(4);
+        var hits = new List<float>(MaxSurfaces);
+        // The strips being built along u: their depth and where they started.
+        var strips = new List<(float depth, int start)>();
 
         for (int j = v0; j <= v1; j++)
         {
-            // The strip being built along u: its depth and where it started.
-            float stripDepth = float.NaN;
-            int stripStart = 0;
-
+            strips.Clear();
             for (int i = u0; i <= u1 + 1; i++)
             {
-                float depth = float.NaN;
+                hits.Clear();
                 if (i <= u1)
                 {
                     var origin = Vector3.zero;
                     origin[axis] = start;
                     origin[u] = (i + 0.5f) * ProbeStep;
                     origin[v] = (j + 0.5f) * ProbeStep;
-                    // The first surface facing the ray; the faces behind it come from the other side's rays.
-                    if (collider.Raycast(new Ray(origin, direction), out var hit, length) && Vector3.Dot(hit.normal, direction) < -0.2f)
+                    SurfacesAlong(collider, origin, direction, length, axis, hits);
+                }
+
+                // A strip goes on where this cell has a surface at its depth, and ends where not.
+                for (int k = strips.Count - 1; k >= 0; k--)
+                {
+                    int match = hits.FindIndex(d => Mathf.Abs(d - strips[k].depth) < 0.004f);
+                    if (match >= 0)
                     {
-                        depth = hit.point[axis];
+                        hits.RemoveAt(match);
+                        continue;
                     }
+
+                    AddStrip(axis, u, v, sign, strips[k].depth, strips[k].start * ProbeStep, i * ProbeStep, j * ProbeStep, (j + 1) * ProbeStep, tris);
+                    strips.RemoveAt(k);
                 }
 
-                bool same = !float.IsNaN(depth) && !float.IsNaN(stripDepth) && Mathf.Abs(depth - stripDepth) < 0.004f;
-                if (same)
+                foreach (float depth in hits)
                 {
-                    continue;
+                    strips.Add((depth, i));
                 }
-
-                if (!float.IsNaN(stripDepth))
-                {
-                    AddStrip(axis, u, v, sign, stripDepth, stripStart * ProbeStep, i * ProbeStep, j * ProbeStep, (j + 1) * ProbeStep, tris);
-                }
-
-                stripDepth = depth;
-                stripStart = i;
             }
+        }
+    }
+
+    // A ray goes on through a mesh: one house's walls are often one mesh, and the first wall it
+    // meets isn't the only one in the region. Every surface facing the ray, up to MaxSurfaces.
+    private const int MaxSurfaces = 8;
+
+    private static void SurfacesAlong(Collider collider, Vector3 origin, Vector3 direction, float length, int axis, List<float> into)
+    {
+        float travelled = 0f;
+        while (into.Count < MaxSurfaces && travelled < length
+            && collider.Raycast(new Ray(origin + direction * travelled, direction), out var hit, length - travelled))
+        {
+            if (Vector3.Dot(hit.normal, direction) < -0.2f)
+            {
+                into.Add(hit.point[axis]);
+            }
+
+            travelled += hit.distance + 0.01f;
         }
     }
 
@@ -519,6 +564,58 @@ internal static class Collision
         {
             tris.Add(Tri(c00, c10, c11));
             tris.Add(Tri(c00, c11, c01));
+        }
+    }
+
+    // Every triangle as the 1/8 voxels it passes through. A level one marks the voxel just under it
+    // (a floor's top is then at most 1/8 block low, never above it); a steep one the voxel it is in.
+    private static unsafe void Voxelize(List<Proto.ColTri> tris, int minX, int minY, int minZ, int maxX, int maxY, int maxZ,
+        Dictionary<(int, int, int), Proto.ColBlock> blocks)
+    {
+        const double cell = 1.0 / 8.0;
+        foreach (var tri in tris)
+        {
+            double ax = tri.v[0], ay = tri.v[1], az = tri.v[2];
+            double bx = tri.v[3], by = tri.v[4], bz = tri.v[5];
+            double cx = tri.v[6], cy = tri.v[7], cz = tri.v[8];
+            double ux = bx - ax, uy = by - ay, uz = bz - az;
+            double vx = cx - ax, vy = cy - ay, vz = cz - az;
+            double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+            double length = Math.Sqrt(nx * nx + ny * ny + nz * nz);
+            if (length < 1e-9)
+            {
+                continue;
+            }
+
+            bool level = Math.Abs(ny / length) > 0.6;
+            double edge = Math.Max(Math.Sqrt(ux * ux + uy * uy + uz * uz), Math.Sqrt(vx * vx + vy * vy + vz * vz));
+            int n = Math.Clamp((int)Math.Ceiling(edge / cell * 1.5), 1, 400);
+            for (int i = 0; i <= n; i++)
+            {
+                for (int j = 0; i + j <= n; j++)
+                {
+                    double s = i / (double)n, t = j / (double)n;
+                    double px = ax + ux * s + vx * t;
+                    double py = ay + uy * s + vy * t - (level ? 0.001 : 0.0);
+                    double pz = az + uz * s + vz * t;
+                    int bx0 = (int)Math.Floor(px), by0 = (int)Math.Floor(py), bz0 = (int)Math.Floor(pz);
+                    if (bx0 < minX || bx0 > maxX || by0 < minY || by0 > maxY || bz0 < minZ || bz0 > maxZ)
+                    {
+                        continue;
+                    }
+
+                    int sx = Math.Clamp((int)((px - bx0) * 8), 0, 7);
+                    int sy = Math.Clamp((int)((py - by0) * 8), 0, 7);
+                    int sz = Math.Clamp((int)((pz - bz0) * 8), 0, 7);
+                    var key = (bx0, by0, bz0);
+                    blocks.TryGetValue(key, out var block);
+                    block.x = bx0;
+                    block.y = by0;
+                    block.z = bz0;
+                    block.bits[sy] |= 1ul << (sz * 8 + sx);
+                    blocks[key] = block;
+                }
+            }
         }
     }
 

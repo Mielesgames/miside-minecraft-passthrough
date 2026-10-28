@@ -190,6 +190,14 @@ MSC_API bool msc_attack_held()
     return input::attack_held();
 }
 
+MSC_API void msc_take_look(int* dx, int* dy)
+{
+    int x = 0, y = 0;
+    input::take_look(x, y);
+    *dx = x;
+    *dy = y;
+}
+
 MSC_API bool msc_grab_held()
 {
     return input::grab_held();
@@ -270,6 +278,26 @@ MSC_API bool msc_solid_at(int x, int y, int z)
 MSC_API int msc_hazard_at(int x, int y, int z)
 {
     return world::hazard_at(x, y, z);
+}
+
+// ---- drawing inside the game's rendering
+
+namespace
+{
+    // Event 1: into the picture; 2: into the depth texture only.
+    void __stdcall on_scene_event(int event, void* data)
+    {
+        if (data != nullptr)
+        {
+            world::draw_scene(*static_cast<const world::SceneView*>(data), event == 2);
+        }
+    }
+}
+
+// For CommandBuffer.IssuePluginEventAndData: data is a world::SceneView of that frame.
+MSC_API void* msc_scene_event()
+{
+    return reinterpret_cast<void*>(&on_scene_event);
 }
 
 // ---- starting Minecraft

@@ -271,7 +271,9 @@ public final class SkyClient {
 		if (qpcFreq == 0) {
 			qpcFreq = SkyLink.qpcFrequency();
 		}
-		float tickMs = minecraft.level != null ? minecraft.level.tickRateManager().millisecondsPerTick() : 50.0F;
+		// 0 while /tick freeze holds: the host stands still then too.
+		float tickMs = minecraft.level == null ? 50.0F
+			: minecraft.level.tickRateManager().isFrozen() ? 0.0F : minecraft.level.tickRateManager().millisecondsPerTick();
 		// The tick really "happened" partial ticks ago (DeltaTracker keeps the remainder).
 		float remainder = minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false);
 		mc.tickQpc = SkyLink.qpc() - (long) (remainder * tickMs * qpcFreq / 1000.0);
@@ -397,6 +399,7 @@ public final class SkyClient {
 		if (!PASSTHROUGH || !linked || player == null) {
 			return;
 		}
+		reportPossession(minecraft, player);
 		reportRedstone(minecraft, player);
 		crawlIntoVents(player);
 		footsteps(minecraft, player);
@@ -462,6 +465,27 @@ public final class SkyClient {
 		stepDistance = 0.0;
 		var sound = net.minecraft.world.level.block.SoundType.DEEPSLATE_TILES;
 		player.playSound(sound.getStepSound(), sound.getVolume() * 0.15F, sound.getPitch());
+	}
+
+	private static int possessTick;
+	private static int possessedLast;
+
+	/**
+	 * Spectator mode taking over a host character (left-click on its stand-in, like on a mob): the
+	 * host lets the player be that character. Told every half second, and at once when it changes.
+	 */
+	private static void reportPossession(Minecraft minecraft, LocalPlayer player) {
+		int possessed = 0;
+		if (player.isSpectator() && minecraft.getCameraEntity() instanceof dev.skycraft.combat.SkyrimActorEntity proxy) {
+			possessed = proxy.formId();
+		}
+		if (possessed != possessedLast || possessTick++ % 10 == 0) {
+			if (possessed != possessedLast) {
+				SkyCraft.LOG.info("MiSideCraft: {}", possessed != 0 ? "taking over " + minecraft.getCameraEntity().getName().getString() : "back to Steve");
+			}
+			possessedLast = possessed;
+			SkyLink.pushEvent(Proto.EV_POSSESS, possessed, 0, 0, 0, 0, 0);
+		}
 	}
 
 	// Redstone sources that are on, as the host game was last told.
@@ -612,6 +636,9 @@ public final class SkyClient {
 			mc.heldToken = dev.skycraft.SkyCraft.tokenOf(player.getMainHandItem());
 			if (player.getVehicle() != null) {
 				flags |= Proto.MC_RIDING;
+			}
+			if (player.getMainHandItem().isEmpty()) {
+				flags |= Proto.MC_HAND_EMPTY;
 			}
 			if (player.getVehicle() instanceof net.minecraft.world.entity.decoration.ArmorStand) {
 				flags |= Proto.MC_HIDING;

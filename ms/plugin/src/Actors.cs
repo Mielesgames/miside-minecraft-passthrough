@@ -26,6 +26,10 @@ internal static class Actors
 
     private const uint EvHitActor = 1;
     private const uint EvActorPush = 10;
+    private const uint EvLeash = 12;
+    // Characters on a lead: where its other end is, and when Minecraft last said so.
+    private static readonly Dictionary<uint, (Vector3 end, float at)> leashes = new();
+    private const float LeashLength = 4f;
 
     private const ushort InTokenName = 11;
     private const ushort InBucketToken = 16;
@@ -80,7 +84,41 @@ internal static class Actors
             knock.velocity *= Mathf.Exp(-6f * Time.deltaTime);
         }
 
+        HoldOnLeashes(now);
         Write(player);
+    }
+
+    // A character further from the lead's other end than the lead is long is pulled back to it,
+    // through her navigation agent where she has one (so not through walls).
+    private static void HoldOnLeashes(float now)
+    {
+        foreach (var (id, leash) in new List<KeyValuePair<uint, (Vector3 end, float at)>>(leashes).ConvertAll(p => (p.Key, p.Value)))
+        {
+            if (now - leash.at > 1f || !byId.TryGetValue(id, out var c) || c.root == null)
+            {
+                leashes.Remove(id);
+                continue;
+            }
+
+            var at = Feet(c);
+            var pull = leash.end - at;
+            pull.y = 0f;
+            if (pull.magnitude <= LeashLength)
+            {
+                continue;
+            }
+
+            var step = pull.normalized * (pull.magnitude - LeashLength);
+            var agent = c.mita != null ? c.mita.nma : null;
+            if (agent != null && agent.isActiveAndEnabled && agent.isOnNavMesh)
+            {
+                agent.Move(step);
+            }
+            else
+            {
+                c.root.position += step;
+            }
+        }
     }
 
     private static void Search()
@@ -165,7 +203,10 @@ internal static class Actors
             uint id = (uint)t.GetInstanceID();
             byId[id] = c;
             var feet = Units.ToMc(at);
-            bool small = IsChibi(c);
+            // As big as she is drawn right now: lying on the floor she is low and long.
+            var seen = Bounds(c);
+            float width = Mathf.Clamp(Mathf.Max(seen.size.x, seen.size.z) * 0.6f, 0.3f, 1.6f);
+            float height = Mathf.Clamp(seen.size.y, 0.3f, 2.2f);
             byte* r = table + RecordsOffset + count * RecordBytes;
             *(uint*)r = id;
             *(uint*)(r + 4) = 0;
@@ -173,8 +214,8 @@ internal static class Actors
             *(float*)(r + 12) = (float)feet.y;
             *(float*)(r + 16) = (float)feet.z;
             *(float*)(r + 20) = Units.YawToMc(t.eulerAngles.y);
-            *(float*)(r + 24) = small ? 0.4f : 0.6f;
-            *(float*)(r + 28) = small ? 0.6f : 1.75f;
+            *(float*)(r + 24) = width;
+            *(float*)(r + 28) = height;
             *(float*)(r + 32) = 1f;
             *(ushort*)(r + 36) = 1;
             *(ushort*)(r + 38) = 0;
@@ -201,6 +242,12 @@ internal static class Actors
     // the middle of what she draws, at the height of its lowest point.
     private static Vector3 Feet(Character c)
     {
+        var bounds = Bounds(c);
+        return bounds.size == Vector3.zero ? c.root.position : new Vector3(bounds.center.x, bounds.min.y, bounds.center.z);
+    }
+
+    private static Bounds Bounds(Character c)
+    {
         bool any = false;
         var bounds = default(Bounds);
         foreach (var renderer in c.root.GetComponentsInChildren<SkinnedMeshRenderer>())
@@ -221,10 +268,14 @@ internal static class Actors
             }
         }
 
-        return any ? new Vector3(bounds.center.x, bounds.min.y, bounds.center.z) : c.root.position;
+        return any ? bounds : new Bounds(c.root.position, Vector3.zero);
     }
 
     // "Mita Chibi(Clone)" -> "Mita Chibi".
+    public static int IdOf(MitaPerson mita) => mita.transform.GetInstanceID();
+
+    public static MitaPerson MitaById(uint id) => byId.TryGetValue(id, out var c) ? c.mita : null;
+
     private static string Clean(string name)
     {
         int clone = name.IndexOf("(Clone)", StringComparison.Ordinal);
@@ -241,13 +292,25 @@ internal static class Actors
 
         switch (ev.type)
         {
+            case EvHitActor when Possession.Active:
+                // Being her: a blow does nothing (Minecraft's spectator can't hit anyway).
+                return true;
             case EvHitActor:
             {
                 // The way the hit went (b, c: Minecraft x, z), as strong as it was (d).
                 var away = new Vector3(ev.b, 0f, -ev.c);
                 away = away.sqrMagnitude > 1e-6f ? away.normalized : -c.root.forward;
                 float strength = Mathf.Clamp(0.5f + ev.d, 0.5f, 3f);
-                Hits.PushCloth(c.root, (away + Vector3.up * 0.3f) * (3f + 2f * strength));
+                Hits.DumpCloths();
+                var body = Bounds(c);
+                body.Expand(0.4f);
+                int pushed = Hits.PushCloth(body, (away + Vector3.up * 0.3f) * (6f + 3f * strength));
+
+                // A sword's sweep (HIT_SWEEP): her upper body goes, her legs walk on.
+                if (((ev.flags & 4u) != 0 || Time.realtimeSinceStartup - sweptAt < 0.6f) && Settings.Sweep)
+                {
+                    Cut(c);
+                }
 
                 bool knockback = c.mita != null ? Settings.MitaKnockback : Settings.NpcKnockback;
                 if (knockback)
@@ -255,15 +318,513 @@ internal static class Actors
                     knocks.Add(new Knock { root = c.root, velocity = away * (4f * strength), until = Time.realtimeSinceStartup + 0.6f });
                 }
 
-                Plugin.Say($"Steve hit {c.name} ({ev.a:F1} damage, {(knockback ? "knocked back" : "only physics")})");
+                Plugin.Say($"Steve hit {c.name} ({ev.a:F1} damage, {(knockback ? "knocked back" : "only physics")}, {pushed} hair/cloth parts pushed)");
                 return true;
             }
             case EvActorPush:
                 c.root.position += new Vector3(ev.a, ev.b, -ev.c);
                 return true;
+            case EvLeash:
+                // On a lead (every tick while she is): the other end is at a, b, c.
+                if (ev.flags == 0)
+                {
+                    leashes.Remove(ev.formId);
+                }
+                else
+                {
+                    leashes[ev.formId] = (Units.FromMc(ev.a, ev.b, ev.c), Time.realtimeSinceStartup);
+                }
+
+                return true;
         }
 
         return false;
+    }
+
+    // ---- flinching: the part that is hit sways back from the blow
+
+    // A bone swinging on a spring: its offset is laid over whatever the animation set, every frame
+    // after the animation (Craft.LateUpdate), so it works whatever she is doing.
+    private sealed class Sway
+    {
+        public Transform bone;
+        public Vector3 axis;      // world axis of the swing
+        public float angle;       // degrees now
+        public float speed;       // degrees per second
+        // Its own pose under the swing, and the pose last set: a bone no animation sets each frame
+        // gets its own pose back (the swing doesn't pile up on itself).
+        public Quaternion baseLocal;
+        public Quaternion setLocal;
+        public bool applied;
+    }
+
+    private static readonly List<Sway> sways = new();
+
+    // What can be struck, and how much of a blow it takes (the head nods back more than the chest).
+    private static readonly (HumanBodyBones bone, float give)[] Struck =
+    {
+        (HumanBodyBones.Head, 1f), (HumanBodyBones.Neck, 0.6f), (HumanBodyBones.Chest, 0.35f), (HumanBodyBones.Spine, 0.3f),
+        (HumanBodyBones.LeftUpperArm, 0.8f), (HumanBodyBones.RightUpperArm, 0.8f),
+        (HumanBodyBones.LeftLowerArm, 1f), (HumanBodyBones.RightLowerArm, 1f),
+        (HumanBodyBones.LeftHand, 1f), (HumanBodyBones.RightHand, 1f),
+    };
+
+    // A blow that landed on one of a character's own colliders (her head, her body): the bone it
+    // sits on sways back, and the joint above it a little. Her hair, hanging from her head, swings
+    // along by itself.
+    public static void Flinch(Transform part, Vector3 from, Vector3 point, Vector3 aim)
+    {
+        // Only bones of her skeleton move (a collider on her root object, far from her model,
+        // swung her whole body round it into the ceiling): the bone nearest to the line of the
+        // blow (her arms have no colliders of their own; the blow lands on her body behind them).
+        var bones = BonesOf(part);
+        var bone = NearestBone(bones, part, from, aim, Vector3.Distance(from, point) + 0.3f);
+        if (bone == null)
+        {
+            return;
+        }
+
+        var lever = point - bone.position;
+        if (lever.sqrMagnitude < 0.0025f)
+        {
+            lever = (bone.parent != null ? bone.position - bone.parent.position : Vector3.up).normalized * 0.1f;
+        }
+
+        var axis = Vector3.Cross(lever, aim);
+        if (axis.sqrMagnitude < 1e-6f)
+        {
+            axis = Vector3.Cross(Vector3.up, aim);
+        }
+
+        axis.Normalize();
+        Kick(bone, axis, 420f);
+        if (bone.parent != null && bones.Contains(bone.parent) && bones.Contains(bone.parent.parent))
+        {
+            Kick(bone.parent, axis, 160f);
+        }
+
+        Plugin.Say($"flinch: {bone.name} (hit {part.name})");
+    }
+
+    // The bones of the character `part` belongs to: what her skinned meshes are bound to.
+    private static HashSet<Transform> BonesOf(Transform part)
+    {
+        var bones = new HashSet<Transform>();
+        Transform root = null;
+        foreach (var c in found)
+        {
+            if (c.root != null && part.IsChildOf(c.root))
+            {
+                root = c.root;
+                break;
+            }
+        }
+
+        if (root == null)
+        {
+            root = part.root;
+        }
+
+        foreach (var skin in root.GetComponentsInChildren<SkinnedMeshRenderer>())
+        {
+            foreach (var bone in skin.bones)
+            {
+                if (bone != null)
+                {
+                    bones.Add(bone);
+                }
+            }
+        }
+
+        return bones;
+    }
+
+    // The bone nearest to the line of the blow, up to where it landed; never the skeleton's root
+    // (that moves her all) nor a finger.
+    private static Transform NearestBone(HashSet<Transform> bones, Transform part, Vector3 from, Vector3 aim, float reach)
+    {
+        Transform best = null;
+        float bestMiss = 0.3f;
+        foreach (var bone in bones)
+        {
+            if (bone.parent == null || !bones.Contains(bone.parent) || IsFinger(bone.name))
+            {
+                continue;
+            }
+
+            float along = Vector3.Dot(bone.position - from, aim);
+            if (along < 0f || along > reach)
+            {
+                continue;
+            }
+
+            float miss = Vector3.Distance(from + aim * along, bone.position);
+            if (miss < bestMiss)
+            {
+                best = bone;
+                bestMiss = miss;
+            }
+        }
+
+        return best ?? (bones.Contains(part) && part.parent != null && bones.Contains(part.parent) ? part : null);
+    }
+
+    private static bool IsFinger(string name)
+    {
+        string n = name.ToLowerInvariant();
+        return n.Contains("finger") || n.Contains("thumb") || n.Contains("index") || n.Contains("middle") || n.Contains("ring")
+            || n.Contains("pinky") || n.Contains("little");
+    }
+
+    // A blow along `aim` from `from`: the nearest bone of a character within reach of the ray sways.
+    // True when one was struck.
+    public static bool Flinch(Vector3 from, Vector3 aim, float reach)
+    {
+        Transform best = null;
+        float bestGive = 0f, bestMiss = 0.22f, bestAlong = 0f;
+        foreach (var c in found)
+        {
+            if (c.root == null || !c.root.gameObject.activeInHierarchy)
+            {
+                continue;
+            }
+
+            var animator = c.mita != null && c.mita.animMita != null ? c.mita.animMita : c.root.GetComponentInChildren<Animator>();
+            if (animator == null || !animator.isHuman)
+            {
+                continue;
+            }
+
+            foreach (var (which, give) in Struck)
+            {
+                var bone = animator.GetBoneTransform(which);
+                if (bone == null)
+                {
+                    continue;
+                }
+
+                float along = Vector3.Dot(bone.position - from, aim);
+                if (along < 0f || along > reach)
+                {
+                    continue;
+                }
+
+                float miss = Vector3.Distance(from + aim * along, bone.position);
+                if (miss < bestMiss)
+                {
+                    best = bone;
+                    bestGive = give;
+                    bestMiss = miss;
+                    bestAlong = along;
+                }
+            }
+        }
+
+        if (best == null)
+        {
+            return false;
+        }
+
+        // Swung away from the blow: about the axis across the blow and the bone's lever (where on it
+        // the blow landed, from its joint).
+        var landed = from + aim * bestAlong;
+        var lever = landed - best.position;
+        if (lever.sqrMagnitude < 0.0025f)
+        {
+            lever = best.parent != null ? best.position - best.parent.position : Vector3.up;
+            lever = lever.normalized * 0.1f + Vector3.up * 0.05f;
+        }
+
+        var axis = Vector3.Cross(lever, aim);
+        if (axis.sqrMagnitude < 1e-6f)
+        {
+            axis = Vector3.Cross(Vector3.up, aim);
+        }
+
+        axis.Normalize();
+        Kick(best, axis, 420f * bestGive);
+        // The joint above gives a little too: a nod of the head moves the neck.
+        if (best.parent != null)
+        {
+            Kick(best.parent, axis, 160f * bestGive);
+        }
+
+        Hits.PushCloth(new Bounds(best.position, Vector3.one * 0.8f), aim * 6f + Vector3.up);
+        Plugin.Say($"flinch: {best.name} of {best.root.name}");
+        return true;
+    }
+
+    private static void Kick(Transform bone, Vector3 axis, float speed)
+    {
+        foreach (var sway in sways)
+        {
+            if (sway.bone == bone)
+            {
+                sway.axis = (sway.axis * Mathf.Abs(sway.angle) + axis * 10f).normalized;
+                sway.speed += speed;
+                return;
+            }
+        }
+
+        sways.Add(new Sway { bone = bone, axis = axis, speed = speed });
+    }
+
+    // Once a frame: every swing's spring moves on (out quickly, a wobble, back), then it is laid on.
+    private static int steppedFrame = -1;
+
+    public static void LateUpdate()
+    {
+        if (steppedFrame != Time.frameCount)
+        {
+            steppedFrame = Time.frameCount;
+            float dt = Mathf.Min(Time.deltaTime, 0.05f);
+            for (int i = sways.Count - 1; i >= 0; i--)
+            {
+                var sway = sways[i];
+                if (sway.bone == null)
+                {
+                    sways.RemoveAt(i);
+                    continue;
+                }
+
+                sway.speed += (-160f * sway.angle - 14f * sway.speed) * dt;
+                sway.angle = Mathf.Clamp(sway.angle + sway.speed * dt, -70f, 70f);
+                if (Mathf.Abs(sway.angle) < 0.05f && Mathf.Abs(sway.speed) < 1f)
+                {
+                    sway.bone.localRotation = Pose(sway);
+                    sways.RemoveAt(i);
+                }
+            }
+        }
+
+        ApplySways();
+    }
+
+    // The swings laid over the pose: again after anything that sets the pose late (her look at the
+    // player, IK), so that doesn't undo them. As often as it runs, each lands once on the pose.
+    public static void ApplySways()
+    {
+        ApplyCuts();
+        foreach (var sway in sways)
+        {
+            if (sway.bone == null)
+            {
+                continue;
+            }
+
+            var pose = Pose(sway);
+            sway.bone.localRotation = pose;
+            sway.bone.rotation = Quaternion.AngleAxis(sway.angle, sway.axis) * sway.bone.rotation;
+            sway.baseLocal = pose;
+            sway.setLocal = sway.bone.localRotation;
+            sway.applied = true;
+        }
+    }
+
+    // The bone's own pose under the swing: unchanged since the swing was laid on (nothing set it
+    // again), the pose it had then; otherwise what the animation or IK set just now.
+    private static Quaternion Pose(Sway sway) =>
+        sway.applied && sway.bone.localRotation == sway.setLocal ? sway.baseLocal : sway.bone.localRotation;
+
+    // ---- cut in half by a sweep
+
+    // When the player's client last made a sword sweep (kEvSweep): a blow right after is one.
+    private static float sweptAt = -10f;
+
+    public static void SweepMade()
+    {
+        sweptAt = Time.realtimeSinceStartup;
+    }
+
+    // The lowest bone of each cut character's spine: everything above it (her chest, arms, head and
+    // hair) is folded away to nothing, so only her hips, skirt and legs are left, walking as before.
+    private static readonly List<Transform> cut = new();
+
+    // Where Steve's last blow went (Hits): which part of whom it was aimed at.
+    private static Transform strikePart;
+    private static Vector3 strikeFrom, strikeAim, strikePoint;
+    private static float strikeAt = -10f;
+
+    public static void RememberStrike(Transform part, Vector3 from, Vector3 aim, Vector3 point)
+    {
+        strikePart = part;
+        strikeFrom = from;
+        strikeAim = aim;
+        strikePoint = point;
+        strikeAt = Time.realtimeSinceStartup;
+    }
+
+    // A sweep takes off the part it was aimed at: an arm from the shoulder, a leg from the hip, the
+    // head at the neck; anywhere else her upper body.
+    private static void Cut(Character c)
+    {
+        if (strikePart != null && Time.realtimeSinceStartup - strikeAt < 1f && strikePart.IsChildOf(c.root))
+        {
+            var bones = BonesOf(c.root);
+            var bone = NearestBone(bones, strikePart, strikeFrom, strikeAim, Vector3.Distance(strikeFrom, strikePoint) + 0.3f);
+            var limb = bone != null ? LimbOf(bone, bones) : null;
+            if (limb != null)
+            {
+                CutAt(c, limb);
+                return;
+            }
+        }
+
+        CutInHalf(c);
+    }
+
+    private static readonly string[] ArmWords = { "arm", "hand", "elbow", "shoulder", "clavicle" };
+    private static readonly string[] LegWords = { "leg", "thigh", "knee", "calf", "shin", "foot", "toe" };
+    private static readonly string[] HeadWords = { "head", "neck" };
+
+    // The top bone of the arm, leg or head `bone` belongs to; null for the body itself.
+    private static Transform LimbOf(Transform bone, HashSet<Transform> bones)
+    {
+        foreach (var words in new[] { ArmWords, LegWords, HeadWords })
+        {
+            if (!Has(bone.name, words))
+            {
+                continue;
+            }
+
+            var top = bone;
+            while (top.parent != null && bones.Contains(top.parent) && Has(top.parent.name, words))
+            {
+                top = top.parent;
+            }
+
+            return top;
+        }
+
+        return null;
+    }
+
+    private static bool Has(string name, string[] words)
+    {
+        string n = name.ToLowerInvariant();
+        foreach (var word in words)
+        {
+            if (n.Contains(word))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void CutAt(Character c, Transform limb)
+    {
+        if (cut.Contains(limb))
+        {
+            return;
+        }
+
+        cut.Add(limb);
+        Plugin.Say($"sweep: {c.name} loses {limb.name}");
+    }
+
+    private static void CutInHalf(Character c)
+    {
+        var bones = BonesOf(c.root);
+        Transform spine = null;
+        foreach (var bone in bones)
+        {
+            if (!bone.name.ToLowerInvariant().Contains("spine"))
+            {
+                continue;
+            }
+
+            // The first spine bone: the one whose parent isn't a spine bone.
+            if (bone.parent == null || !bone.parent.name.ToLowerInvariant().Contains("spine"))
+            {
+                spine = bone;
+                break;
+            }
+        }
+
+        if (spine == null || cut.Contains(spine))
+        {
+            return;
+        }
+
+        cut.Add(spine);
+        Plugin.Say($"sweep: {c.name} cut in half at {spine.name}");
+    }
+
+    private static void ApplyCuts()
+    {
+        for (int i = cut.Count - 1; i >= 0; i--)
+        {
+            if (cut[i] == null)
+            {
+                cut.RemoveAt(i);
+                continue;
+            }
+
+            // Not quite nothing: a bone of size zero can't be turned back into anything.
+            cut[i].localScale = Vector3.one * 0.0001f;
+        }
+    }
+
+    // ---- Minecraft's tools on a character (right click on her)
+
+    private const ushort InShear = 21;
+    private const ushort InLeash = 20;
+    private const ushort InWearPumpkin = 24;
+    private const uint McHoldsShears = 1u << 20;
+    private const uint McHoldsLead = 1u << 15;
+    private const uint McHoldsPumpkin = 1u << 22;
+
+    // The character Steve looks at within reach: on her colliders, or right in front of his eyes.
+    private static Character Aimed(Transform camera, Transform player, float reach)
+    {
+        var hit = Hits.Aimed(camera, player, out var aimed);
+        Character best = null;
+        float bestAngle = 15f;
+        foreach (var c in found)
+        {
+            if (c.root == null || !c.root.gameObject.activeInHierarchy)
+            {
+                continue;
+            }
+
+            if (aimed && hit.collider.transform.IsChildOf(c.root))
+            {
+                return c;
+            }
+
+            var seen = Bounds(c);
+            var to = seen.center - camera.position;
+            float angle = Vector3.Angle(camera.forward, to);
+            if (to.magnitude < reach && angle < bestAngle)
+            {
+                best = c;
+                bestAngle = angle;
+            }
+        }
+
+        return best;
+    }
+
+    public static bool UseTool(Transform camera, Transform player, uint mcFlags)
+    {
+        ushort input = (mcFlags & McHoldsShears) != 0 ? InShear : (mcFlags & McHoldsLead) != 0 ? InLeash : (mcFlags & McHoldsPumpkin) != 0 ? InWearPumpkin : (ushort)0;
+        if (input == 0)
+        {
+            return false;
+        }
+
+        var c = Aimed(camera, player, 3f);
+        if (c == null)
+        {
+            return false;
+        }
+
+        uint id = (uint)c.root.GetInstanceID();
+        Native.msc_push_input(input, (ushort)(input == InLeash ? 1 : 0), (int)id, 0, 0);
+        Plugin.Say($"tool on {c.name}: {(input == InShear ? "shears" : input == InLeash ? "lead" : "something to wear")}");
+        return true;
     }
 
     // ---- picking up a Chibi Mita (right click). True when one was picked up.
@@ -274,7 +835,7 @@ internal static class Actors
         Character chibi = null;
         foreach (var c in found)
         {
-            if (c.root == null || !c.root.gameObject.activeInHierarchy || !IsChibi(c))
+            if (c.root == null || !c.root.gameObject.activeInHierarchy || (!holdsBucket && !IsChibi(c)))
             {
                 continue;
             }
@@ -348,6 +909,8 @@ internal static class Actors
     {
         pickedUp.Clear();
         knocks.Clear();
+        sways.Clear();
+        cut.Clear();
     }
 
     private static int Pack(string text, int from)

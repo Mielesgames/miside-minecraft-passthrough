@@ -43,23 +43,50 @@ public final class SkySettings {
 		OPTIONS.put("doors", new Option(Proto.SETTING_DOORS,
 			"doors: realistic = hit them open, minecraft = right-click opens and closes, left-click breaks them (when block breaking is on)",
 			"realistic", "minecraft"));
+		OPTIONS.put("reactions", new Option(Proto.SETTING_REACTIONS,
+			"the part of a character you hit (head, arm, body) sways back from the blow", "on", "off"));
+		OPTIONS.put("sweep", new Option(Proto.SETTING_SWEEP,
+			"a sword's sweep attack cuts a character in half: only her legs walk on", "on", "off"));
 		OPTIONS.put("physics", new Option(Proto.SETTING_PHYSICS,
 			"every hit also pushes MiSide's physics (doors, things lying around, hair) where you aim", "on", "off"));
 	}
 
-	private static final Map<String, String> DEFAULTS = Map.of("mita", "realistic", "npcs", "minecraft", "doors", "realistic", "physics", "on");
+	private static final Map<String, String> DEFAULTS = Map.of("mita", "realistic", "npcs", "realistic", "doors", "realistic", "physics", "on", "reactions", "on", "sweep", "on");
 	private static final Properties VALUES = new Properties();
 	private static Path file;
 	private static int ticks;
 
 	public static void init() {
-		ServerLifecycleEvents.SERVER_STARTED.register(SkySettings::load);
+		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+			load(server);
+			// /tick goes to the host's time too: a world always opens at the normal speed, so a rate
+			// left too high (or a freeze) can never lock the game for good.
+			server.tickRateManager().setTickRate(20.0F);
+			server.tickRateManager().setFrozen(false);
+		});
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
 			if (ticks++ % 40 == 0) {
 				send(server);
 			}
+			keepTickRate(server);
 		});
 		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> register(dispatcher));
+	}
+
+	// The host's own time can't go faster than this, nor slower: /tick rate is kept within.
+	private static final float MAX_TICK_RATE = 60.0F;
+	private static final float MIN_TICK_RATE = 1.0F;
+
+	private static void keepTickRate(MinecraftServer server) {
+		var manager = server.tickRateManager();
+		float rate = manager.tickrate();
+		float kept = Math.max(MIN_TICK_RATE, Math.min(MAX_TICK_RATE, rate));
+		if (kept != rate) {
+			manager.setTickRate(kept);
+			server.getPlayerList().broadcastSystemMessage(Component.literal(
+				"MiSide's time goes along with /tick: the rate stays between " + (int) MIN_TICK_RATE + " and " + (int) MAX_TICK_RATE + ".").withStyle(ChatFormatting.YELLOW), false);
+			SkyCraft.LOG.info("MiSideCraft: tick rate {} kept at {}", rate, kept);
+		}
 	}
 
 	public static String get(String option) {

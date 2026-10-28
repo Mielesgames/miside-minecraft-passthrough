@@ -201,6 +201,16 @@ public final class InputBridge {
 					});
 				}
 			}
+			case Proto.IN_HIT_SOUND -> {
+				// Steve struck something of the host's (a door, a cup): the blow, and what it is made of.
+				if (minecraft.level != null) {
+					double x = a / 100.0, y = b / 100.0, z = c / 100.0;
+					var material = code == 0 ? net.minecraft.world.level.block.SoundType.WOOD
+						: code == 2 ? net.minecraft.world.level.block.SoundType.WOOL : net.minecraft.world.level.block.SoundType.STONE;
+					minecraft.level.playLocalSound(x, y, z, net.minecraft.sounds.SoundEvents.PLAYER_ATTACK_STRONG, net.minecraft.sounds.SoundSource.PLAYERS, 0.8F, 1.0F, false);
+					minecraft.level.playLocalSound(x, y, z, material.getHitSound(), net.minecraft.sounds.SoundSource.BLOCKS, 1.0F, 0.8F, false);
+				}
+			}
 			case Proto.IN_FORGET_REGIONS -> dev.skycraft.world.SkyCollision.forget(a / 100.0, b / 100.0, c / 100.0, code);
 			case Proto.IN_SAVE_SLOT_TEXT -> {
 				for (int word : new int[] { a, b, c }) {

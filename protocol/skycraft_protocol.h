@@ -108,6 +108,7 @@ namespace skycraft::proto
 		kMcHoldsFlipTag = 1u << 12,  // a name tag named Dinnerbone or Grumm in the main hand
 		kMcDoorsLocked = 1u << 13,   // gamerule allow_opening_doors is off
 		kMcRiding = 1u << 27,       // sits in or on something (a boat, a minecart, a mule): carried, not falling
+		kMcHandEmpty = 1u << 28,    // nothing in the main hand: a right-click on the host's furniture sits on it
 		kMcSlotReady = 1u << 26,    // Minecraft has the world of the MiSide save the host last named open
 		kMcAllowCheating = 1u << 25, // gamerule allow_cheating: the game's "you can't use this now" is ignored
 		kMcHoldsJebTag = 1u << 24,   // a name tag called jeb_ in the main hand: right-click makes a host character rainbow
@@ -211,6 +212,8 @@ namespace skycraft::proto
 		kInGameItemText = 33,    // an item's display name: 12 characters in a, b, c, under code = its index
 		kInGameItem = 34,        // item code is complete: a = its category (EInventoryItemCategory)
 		kInGameItemsEnd = 35,    // the list is complete: code = how many
+		kInHitSound = 36,        // Steve struck something of the host's: the sound of the blow at a, b, c (Minecraft x 100);
+		                         // code 0 wood (a door), 1 something hard, 2 something soft
 		kInForgetRegions = 31,   // the game streamed a big part of the map in: what is known within code blocks of a, b, c (Minecraft x 100) is unknown until scanned again
 		kInRidePos = 30,         // Steve rides something the game moves: its feet at a, b, c (Minecraft x 100); the mule goes there
 		kInEnderPuff = 27,       // a host character teleported like an enderman: its sound and purple particles at a, b, c
@@ -329,6 +332,9 @@ namespace skycraft::proto
 		                    // d = yaw. Sent every tick while it does; the host keeps the character there.
 		kEvRedstone = 7,    // a redstone source near the player switched: a/b/c = its block, flags = 1 on / 0 off.
 		                    // MiSide's doors within a few blocks of one open.
+		kEvPossess = 19,    // spectator mode looks through a host character's stand-in: formId = that character (0: no
+		                    // one). Every half second; the host then lets the player be that character
+		kEvSweep = 20,      // the player's client just made a sword sweep: a blow on a character right after is one
 		kEvSetting = 18,    // a /miside setting: formId = SettingOption, flags = its value (repeated every 2 s)
 		kEvCommand = 6,     // a chat command about one of the host game's characters: formId = HostCharacter,
 		                    // flags = 0: bring it to the player, 1: spawn a new one
@@ -342,6 +348,8 @@ namespace skycraft::proto
 		kSettingDoors = 3,          // 0 realistic (hit open), 1 minecraft (right-click opens, left-click breaks)
 		kSettingPhysics = 4,        // 0 on, 1 off: every hit also pushes the host's physics
 		kSettingBlockBreaking = 5,  // 1: Steve may break the host's things (the block breaking experiment)
+		kSettingReactions = 6,      // 0 on, 1 off: the part of a character that is hit sways back from the blow
+		kSettingSweep = 7,          // 0 on, 1 off: a sword's sweep cuts a character in half (her legs walk on)
 	};
 
 	// Who a kEvCommand is about. Matched against the names of the game's character classes.

@@ -77,7 +77,9 @@ public final class TriCollider {
 				dy = Math.max(0.0, Math.min(dy, ceiling - (y + height)));
 			}
 		}
-		double walkUp = wasOnGround ? step : AIR_STEP;
+		// Never a step up higher than half one's own height: a small player (/attribute ... scale) under a
+		// sofa would otherwise step onto its underside, and stand on its seat the next tick.
+		double walkUp = Math.min(wasOnGround ? step : AIR_STEP, height * 0.5);
 		double floorWalk = floor(tris, x, y, z, true, walkUp);
 		double floorAny = floor(tris, x, y, z, false, EPS);
 		double floor = Math.max(floorWalk, floorAny);

@@ -67,6 +67,7 @@ public final class Proto {
 	public static final int IN_GAME_ITEM_TEXT = 33;
 	public static final int IN_GAME_ITEM = 34;
 	public static final int IN_GAME_ITEMS_END = 35;
+	public static final int IN_HIT_SOUND = 36;
 	public static final int HURT_MELEE = 0;
 	public static final int HURT_PROJECTILE = 1;
 	public static final int HURT_MAGIC = 2;
@@ -107,12 +108,16 @@ public final class Proto {
 	public static final int EV_ACTOR_BLIND = 14;
 	public static final int EV_MENU = 15;
 	public static final int EV_SETTING = 18;
+	public static final int EV_POSSESS = 19;
+	public static final int EV_SWEEP = 20;
 	// EV_SETTING's options (formId); flags = the value's index (see SkySettings).
 	public static final int SETTING_MITA = 1;
 	public static final int SETTING_NPCS = 2;
 	public static final int SETTING_DOORS = 3;
 	public static final int SETTING_PHYSICS = 4;
 	public static final int SETTING_BLOCK_BREAKING = 5;
+	public static final int SETTING_REACTIONS = 6;
+	public static final int SETTING_SWEEP = 7;
 	public static final int EV_SQUASH = 16;
 	public static final int EV_CREDITS = 17;
 	/** Names for EV_COMMAND's formId (HostCharacter in the header): index + 1. */
@@ -260,6 +265,7 @@ public final class Proto {
 	public static final int MC_ALLOW_CHEATING = 1 << 25;
 	public static final int MC_SLOT_READY = 1 << 26;
 	public static final int MC_RIDING = 1 << 27;
+	public static final int MC_HAND_EMPTY = 1 << 28;
 
 	// Overlay
 	public static final long OC_STATE = 0x00;

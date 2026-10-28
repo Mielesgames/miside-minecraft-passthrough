@@ -65,13 +65,14 @@ internal static class Launcher
             fabric = @"D:\Github\miside-minecraft-passthrough\fabric";
         }
 
-        var info = new ProcessStartInfo(@"C:\Windows\System32\cmd.exe", $"/C call \"{fabric}\\gradlew.bat\" runClient")
+        var info = new ProcessStartInfo(@"C:\Windows\System32\cmd.exe", $"/C call \"{fabric}\\gradlew.bat\" runClient --no-daemon")
         {
             WorkingDirectory = fabric,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
         // Tells the Minecraft side there is no Skyrim collision feed: it is a passthrough host.
+        // (No Gradle daemon: Minecraft is then a child of this process tree and closes with MiSide.)
         info.EnvironmentVariables["SKYCRAFT_PASSTHROUGH"] = "1";
 
         try
