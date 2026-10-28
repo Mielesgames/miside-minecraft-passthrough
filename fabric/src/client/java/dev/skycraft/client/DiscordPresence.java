@@ -27,8 +27,8 @@ import org.jspecify.annotations.Nullable;
  * a write on the same pipe. Without Discord running it quietly retries now and then.
  */
 public final class DiscordPresence {
-	// The SkyCraft application on Discord's developer portal (public; not a secret).
-	private static final String APP_ID = System.getProperty("skycraft.discordAppId", "1554889902309642280");
+	// A Discord application for MiSideCraft (developer portal; public, not a secret). 0: off until one exists.
+	private static final String APP_ID = System.getProperty("skycraft.discordAppId", "0");
 	// e4mc's addresses, as it prints them in chat (visible, or only in its click-to-copy action).
 	private static final Pattern E4MC_LINK = Pattern.compile("[a-z0-9-]+(?:\\.[a-z0-9-]+)*\\.e4mc\\.link", Pattern.CASE_INSENSITIVE);
 	private static final int OP_HANDSHAKE = 0, OP_FRAME = 1, OP_CLOSE = 2, OP_PING = 3, OP_PONG = 4;
@@ -43,7 +43,7 @@ public final class DiscordPresence {
 
 	public static void start() {
 		if ("0".equals(APP_ID) || APP_ID.isBlank()) {
-			SkyCraft.LOG.info("SkyCraft: Discord Rich Presence off (no application id)");
+			SkyCraft.LOG.info("MiSideCraft: Discord Rich Presence off (no application id)");
 			return;
 		}
 		Thread thread = new Thread(DiscordPresence::run, "SkyCraft Discord");
@@ -56,7 +56,7 @@ public final class DiscordPresence {
 		String link = findLink(message);
 		if (link != null) {
 			hostLink = link;
-			SkyCraft.LOG.info("SkyCraft: this world is open to friends at {}", link);
+			SkyCraft.LOG.info("MiSideCraft: this world is open to friends at {}", link);
 		}
 	}
 
@@ -93,13 +93,13 @@ public final class DiscordPresence {
 			int players = minecraft.getConnection().getOnlinePlayers().size();
 			String friend = MirrorWorld.friendAddress(minecraft);
 			activity = new JsonObject();
-			activity.addProperty("details", "Playing Skyrim as a Minecraft player");
+			activity.addProperty("details", "Playing MiSide as Steve");
 			JsonObject timestamps = new JsonObject();
 			timestamps.addProperty("start", START);
 			activity.add("timestamps", timestamps);
 			JsonObject assets = new JsonObject();
 			assets.addProperty("large_image", "skycraft");
-			assets.addProperty("large_text", "SkyCraft");
+			assets.addProperty("large_text", "MiSideCraft");
 			activity.add("assets", assets);
 			String joinable = hostLink != null ? hostLink : friend;
 			if (hostLink != null) {
@@ -157,12 +157,12 @@ public final class DiscordPresence {
 				readAvailable();
 				Thread.sleep(250);
 			} catch (IOException e) {
-				SkyCraft.LOG.info("SkyCraft: Discord connection closed ({}); retrying later", e.getMessage());
+				SkyCraft.LOG.info("MiSideCraft: Discord connection closed ({}); retrying later", e.getMessage());
 				close();
 			} catch (InterruptedException e) {
 				return;
 			} catch (RuntimeException e) {
-				SkyCraft.LOG.warn("SkyCraft: Discord Rich Presence error", e);
+				SkyCraft.LOG.warn("MiSideCraft: Discord Rich Presence error", e);
 				close();
 			}
 		}
@@ -186,7 +186,7 @@ public final class DiscordPresence {
 				JsonObject msg = readFrame();
 				if (msg != null && "READY".equals(str(msg, "evt"))) {
 					command("SUBSCRIBE", null, "ACTIVITY_JOIN");
-					SkyCraft.LOG.info("SkyCraft: connected to Discord (Rich Presence)");
+					SkyCraft.LOG.info("MiSideCraft: connected to Discord (Rich Presence)");
 					loggedNoDiscord = false;
 					sentActivity = null;
 					return true;
@@ -200,7 +200,7 @@ public final class DiscordPresence {
 		}
 		if (!loggedNoDiscord) {
 			loggedNoDiscord = true;
-			SkyCraft.LOG.info("SkyCraft: Discord isn't running; Rich Presence will connect when it is");
+			SkyCraft.LOG.info("MiSideCraft: Discord isn't running; Rich Presence will connect when it is");
 		}
 		return false;
 	}
@@ -224,11 +224,11 @@ public final class DiscordPresence {
 			if ("DISPATCH".equals(str(msg, "cmd")) && "ACTIVITY_JOIN".equals(str(msg, "evt")) && msg.has("data")) {
 				String secret = str(msg.getAsJsonObject("data"), "secret");
 				if (secret != null && E4MC_LINK.matcher(secret).matches()) {
-					SkyCraft.LOG.info("SkyCraft: joining {} from Discord", secret);
+					SkyCraft.LOG.info("MiSideCraft: joining {} from Discord", secret);
 					Minecraft.getInstance().execute(() -> MirrorWorld.joinFriend(Minecraft.getInstance(), secret));
 				}
 			} else if ("ERROR".equals(str(msg, "evt"))) {
-				SkyCraft.LOG.warn("SkyCraft: Discord says {}", msg.get("data"));
+				SkyCraft.LOG.warn("MiSideCraft: Discord says {}", msg.get("data"));
 			}
 		}
 	}

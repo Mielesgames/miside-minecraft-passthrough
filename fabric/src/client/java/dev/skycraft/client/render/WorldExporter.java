@@ -69,6 +69,11 @@ public final class WorldExporter {
 	private static final LongOpenHashSet LIT = new LongOpenHashSet(); // sections Skyrim holds lights for
 	private static final LongOpenHashSet SOLID = new LongOpenHashSet(); // sections Skyrim holds NPC collision for
 	private static final long[] SOLID_BITS = new long[64]; // 4096 blocks: bit x + 16z + 256y
+	// MiSide: blocks that aren't full cubes (doors, fences, slabs) go as their actual boxes,
+	// so an open door lets a character through and a closed one doesn't.
+	private static final LongOpenHashSet SHAPED = new LongOpenHashSet(); // sections the host holds such boxes for
+	private static final int MAX_SHAPES = 4096;
+	private static final ByteBuffer SHAPES = ByteBuffer.allocate(MAX_SHAPES * 12).order(ByteOrder.LITTLE_ENDIAN);
 	private static final LongOpenHashSet DUG = new LongOpenHashSet(); // sections Skyrim holds dug cells for
 	private static final ByteBuffer LIGHTS = ByteBuffer.allocate(16 * 16 * 16 * 8).order(ByteOrder.LITTLE_ENDIAN);
 	private static int sentGeneration = Integer.MIN_VALUE;
@@ -122,7 +127,7 @@ public final class WorldExporter {
 		sentGeneration = SkyLink.generation();
 		sentLevel = level;
 		atlas = SkyAtlas.build(minecraft);
-		SkyCraft.LOG.info("SkyCraft: {} animated textures (water, lava, fire, ...) will play in Skyrim", atlas.animatedSprites());
+		SkyCraft.LOG.info("MiSideCraft: {} animated textures (water, lava, fire, ...) will play in the game", atlas.animatedSprites());
 		AvatarExporter.reset();
 		ICONS.clear();
 		CUBE_FACES.clear();
@@ -132,10 +137,11 @@ public final class WorldExporter {
 		SkyLink.writeRender(Proto.REN_CLEAR_ALL, ByteBuffer.allocate(0), null);
 		ByteBuffer header = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putInt(atlas.width).putInt(atlas.height).flip();
 		boolean ok = SkyLink.writeRender(Proto.REN_ATLAS, header, atlas.pixels.duplicate().clear());
-		SkyCraft.LOG.info("SkyCraft: sent {}x{} texture atlas to Skyrim ({})", atlas.width, atlas.height, ok ? "ok" : "FAILED");
+		SkyCraft.LOG.info("MiSideCraft: sent {}x{} texture atlas to the game ({})", atlas.width, atlas.height, ok ? "ok" : "FAILED");
 		SENT.clear();
 		LIT.clear();
 		SOLID.clear();
+		SHAPED.clear();
 		DUG.clear();
 		dev.skycraft.client.SkyDigClient.resendAll();
 		// Everything already loaded needs meshing again; later chunk loads mark themselves dirty.
@@ -191,13 +197,17 @@ public final class WorldExporter {
 		LevelChunkSection section = sectionAt(level, chunk, sy);
 		boolean empty = section == null || section.hasOnlyAir();
 		long[] dug = dev.skycraft.client.SkyDigClient.dugBits(chunk, sy);
+		// A copy: inverted blocks are added to it below, and the chunk's own record must not change.
+		if (dug != null) {
+			dug = dug.clone();
+		}
 		int dugCount = 0;
 		if (dug != null) {
 			for (long word : dug) {
 				dugCount += Long.bitCount(word);
 			}
 		}
-		if (empty && !SENT.contains(key) && !LIT.contains(key) && !SOLID.contains(key) && dugCount == 0 && !DUG.contains(key)) {
+		if (empty && !SENT.contains(key) && !LIT.contains(key) && !SOLID.contains(key) && !SHAPED.contains(key) && dugCount == 0 && !DUG.contains(key)) {
 			return false; // nothing there and nothing to remove
 		}
 		MESH.reset();
@@ -205,6 +215,8 @@ public final class WorldExporter {
 		int lightCount = 0;
 		java.util.Arrays.fill(SOLID_BITS, 0L);
 		int solidCount = 0;
+		SHAPES.clear();
+		int shapeCount = 0;
 		MESH.cardinal = level.cardinalLighting();
 		if (!empty) {
 			BlockPos origin = SectionPos.of(sx, sy, sz).origin();
@@ -217,11 +229,33 @@ public final class WorldExporter {
 						if (state.isAir()) {
 							continue;
 						}
-						// Blocks Skyrim's NPCs can't walk through (anything with a collision shape).
-						if (!state.getCollisionShape(level, pos).isEmpty()) {
+						// A hole in the host's world: sent as dug, like Skyrim's dug cells.
+						if (state.is(dev.skycraft.SkyCraft.INVERTED_BLOCK)) {
+							if (dug == null) {
+								dug = new long[64];
+							}
 							int bit = x + 16 * z + 256 * y;
-							SOLID_BITS[bit >> 6] |= 1L << (bit & 63);
-							solidCount++;
+							dug[bit >> 6] |= 1L << (bit & 63);
+							continue;
+						}
+						// Blocks Skyrim's NPCs can't walk through (anything with a collision shape).
+						var collision = state.getCollisionShape(level, pos);
+						if (!collision.isEmpty()) {
+							if (dev.skycraft.world.SkyDig.PASSTHROUGH && !net.minecraft.world.level.block.Block.isShapeFullBlock(collision)) {
+								for (net.minecraft.world.phys.AABB box : collision.toAabbs()) {
+									if (shapeCount < MAX_SHAPES) {
+										SHAPES.put((byte) x).put((byte) y).put((byte) z).put((byte) 0)
+											.put(sixteenths(box.minX)).put(sixteenths(box.minY)).put(sixteenths(box.minZ))
+											.put(sixteenths(box.maxX)).put(sixteenths(box.maxY)).put(sixteenths(box.maxZ))
+											.put((byte) 0).put((byte) 0);
+										shapeCount++;
+									}
+								}
+							} else {
+								int bit = x + 16 * z + 256 * y;
+								SOLID_BITS[bit >> 6] |= 1L << (bit & 63);
+								solidCount++;
+							}
 						}
 						// Light-emitting blocks (torches, lava, glowstone, ...) light Skyrim's world too.
 						int emission = state.getLightEmission();
@@ -241,17 +275,28 @@ public final class WorldExporter {
 							var model = Minecraft.getInstance().getModelManager().getBlockStateModelSet().get(state);
 							blockRenderer.tesselateBlock(MESH, x, y, z, level, pos.immutable(), state, model, state.getSeed(pos));
 						}
+						if (state.is(net.minecraft.world.level.block.Blocks.END_PORTAL)) {
+							endPortal(x, y, z);
+						}
 					}
 				}
 			}
 		}
+		if (dug != null) {
+			dugCount = 0;
+			for (long word : dug) {
+				dugCount += Long.bitCount(word);
+			}
+		}
 		// Holes dug into Skyrim's ground: Minecraft walls where its surface still runs above them.
+		// (MiSide draws its own pit instead.)
 		var digLookup = dev.skycraft.world.SkyDig.clientDug;
-		if (dugCount > 0 && digLookup != null) {
+		if (dugCount > 0 && digLookup != null && !dev.skycraft.world.SkyDig.PASSTHROUGH) {
 			Minecraft minecraft = Minecraft.getInstance();
 			DigWalls.add(level, sx, sy, sz, dug, digLookup, st -> cubeFaces(minecraft, st), MESH::wall);
 		}
-		if (MESH.vertexCount() == 0 && !SENT.contains(key) && lightCount == 0 && !LIT.contains(key) && solidCount == 0 && !SOLID.contains(key) && dugCount == 0
+		if (MESH.vertexCount() == 0 && !SENT.contains(key) && lightCount == 0 && !LIT.contains(key) && solidCount == 0 && !SOLID.contains(key)
+			&& shapeCount == 0 && !SHAPED.contains(key) && dugCount == 0
 			&& !DUG.contains(key)) {
 			return true;
 		}
@@ -288,6 +333,16 @@ public final class WorldExporter {
 					SOLID.remove(key);
 				}
 			}
+			if (shapeCount > 0 || SHAPED.contains(key)) {
+				ByteBuffer shapeHeader = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(shapeCount).flip();
+				if (!SkyLink.writeRender(Proto.REN_SHAPES, shapeHeader, SHAPES.flip())) {
+					markDirty(sx, sy, sz);
+				} else if (shapeCount > 0) {
+					SHAPED.add(key);
+				} else {
+					SHAPED.remove(key);
+				}
+			}
 			// Cells dug out of Skyrim's world: its geometry there goes.
 			if (dugCount > 0 || DUG.contains(key)) {
 				ByteBuffer dugHeader = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(dugCount)
@@ -307,7 +362,7 @@ public final class WorldExporter {
 				}
 			}
 			if (++meshesSent <= 10 || meshesSent % 200 == 0) {
-				SkyCraft.LOG.info("SkyCraft: block mesh for section {} {} {}: {} vertices ({} sections in Skyrim)", sx, sy, sz, MESH.vertexCount(), SENT.size());
+				SkyCraft.LOG.info("MiSideCraft: block mesh for section {} {} {}: {} vertices ({} sections in the game)", sx, sy, sz, MESH.vertexCount(), SENT.size());
 			}
 		} else {
 			markDirty(sx, sy, sz); // ring full; try again later
@@ -403,6 +458,22 @@ public final class WorldExporter {
 		});
 	}
 
+	/**
+	 * An end portal's surface: Minecraft draws it with a shader of its own (no model), so it gets
+	 * a quad of the mod's starfield texture at the portal's height, seen from above and below, at
+	 * full brightness.
+	 */
+	private static void endPortal(int x, int y, int z) {
+		var sprite = Minecraft.getInstance().getAtlasManager().getAtlasOrThrow(net.minecraft.data.AtlasIds.BLOCKS)
+			.getSprite(net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", "block/end_portal_surface"));
+		float[] r = atlas.rect(sprite);
+		float top = y + 0.75F;
+		float[] uv = { r[0], r[1], r[0], r[3], r[2], r[3], r[2], r[1] };
+		MESH.wall(new float[] { x, top, z, x, top, z + 1, x + 1, top, z + 1, x + 1, top, z }, uv, 0xF000F0, Direction.UP);
+		MESH.wall(new float[] { x, top, z, x + 1, top, z, x + 1, top, z + 1, x, top, z + 1 },
+			new float[] { uv[0], uv[1], uv[6], uv[7], uv[4], uv[5], uv[2], uv[3] }, 0xF000F0, Direction.DOWN);
+	}
+
 	/** Grass and leaves are grey in the atlas; Minecraft tints them. RGBA8, 0 for none. */
 	private static int cubeTint(Minecraft minecraft, BlockState state) {
 		var sources = minecraft.getBlockColors().getTintSources(state);
@@ -444,6 +515,10 @@ public final class WorldExporter {
 		return atlas.rect(material.sprite());
 	}
 
+	private static byte sixteenths(double v) {
+		return (byte) Math.max(0, Math.min(16, Math.round(v * 16.0)));
+	}
+
 	/** Outline for Skyrim to draw: the targeted block, or where a held block would go on Skyrim ground. */
 	private static float[] selection(Minecraft minecraft, ClientLevel level) {
 		HitResult hit = minecraft.hitResult;
@@ -452,7 +527,8 @@ public final class WorldExporter {
 		}
 		BlockPos pos = blockHit.getBlockPos();
 		if (blockHit instanceof SkyClip.SkyrimHitResult) {
-			if (!(minecraft.player.getMainHandItem().getItem() instanceof BlockItem)) {
+			// MiSide: only real blocks get an outline, like in Minecraft itself.
+			if (dev.skycraft.world.SkyDig.PASSTHROUGH || !(minecraft.player.getMainHandItem().getItem() instanceof BlockItem)) {
 				return null;
 			}
 			return new float[] { pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1 };

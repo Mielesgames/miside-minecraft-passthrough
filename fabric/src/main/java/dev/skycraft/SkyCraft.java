@@ -15,21 +15,510 @@ import org.slf4j.LoggerFactory;
 
 public final class SkyCraft implements ModInitializer {
 	public static final String MOD_ID = "skycraft";
-	public static final String WORLD_NAME = "SkyCraft";
+	public static final String WORLD_NAME = "MiSideCraft";
 	public static final Logger LOG = LoggerFactory.getLogger(MOD_ID);
 	private static final String KIT2_TAG = "skycraft_builder_kit";
+	private static final String GUIDE_TAG = "misidecraft_guide";
+	private static final String HOME_KIT_TAG = "misidecraft_home_kit";
+
+	/** MiSide: Steve may open (and redstone may open) the game's doors. */
+	public static final net.minecraft.world.level.gamerules.GameRule<Boolean> ALLOW_OPENING_DOORS =
+		net.fabricmc.fabric.api.gamerule.v1.GameRuleBuilder.forBoolean(true)
+			.category(net.minecraft.world.level.gamerules.GameRuleCategory.PLAYER)
+			.buildAndRegister(net.minecraft.resources.Identifier.withDefaultNamespace("allow_opening_doors"));
+
+	/** MiSide: a hole in the host's world (see InvertedBlock). */
+	public static final net.minecraft.resources.ResourceKey<net.minecraft.world.level.block.Block> INVERTED_BLOCK_KEY = net.minecraft.resources.ResourceKey.create(
+		net.minecraft.core.registries.Registries.BLOCK, net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", "inverted_block"));
+	public static final net.minecraft.world.level.block.Block INVERTED_BLOCK = net.minecraft.core.Registry.register(
+		net.minecraft.core.registries.BuiltInRegistries.BLOCK, INVERTED_BLOCK_KEY,
+		new dev.skycraft.world.InvertedBlock(net.minecraft.world.level.block.state.BlockBehaviour.Properties.of()
+			.setId(INVERTED_BLOCK_KEY).noCollision().noOcclusion().strength(0.3F)));
+	public static final net.minecraft.resources.ResourceKey<net.minecraft.world.item.Item> INVERTED_ITEM_KEY = net.minecraft.resources.ResourceKey.create(
+		net.minecraft.core.registries.Registries.ITEM, net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", "inverted_block"));
+	public static final net.minecraft.world.item.Item INVERTED_ITEM = net.minecraft.core.Registry.register(
+		net.minecraft.core.registries.BuiltInRegistries.ITEM, INVERTED_ITEM_KEY,
+		new net.minecraft.world.item.BlockItem(INVERTED_BLOCK, new net.minecraft.world.item.Item.Properties().setId(INVERTED_ITEM_KEY).useBlockDescriptionPrefix()));
+
+	/** MiSide: fills a hole mined into the host's world again. */
+	public static final net.minecraft.resources.ResourceKey<net.minecraft.world.item.Item> VOID_FILLER_KEY = net.minecraft.resources.ResourceKey.create(
+		net.minecraft.core.registries.Registries.ITEM, net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", "void_filler"));
+	public static final net.minecraft.world.item.Item VOID_FILLER = net.minecraft.core.Registry.register(
+		net.minecraft.core.registries.BuiltInRegistries.ITEM, VOID_FILLER_KEY,
+		new net.minecraft.world.item.Item(new net.minecraft.world.item.Item.Properties().setId(VOID_FILLER_KEY).stacksTo(1)));
+
+	/**
+	 * MiSide: experimental features (still buggy). Off by default, saved with the world:
+	 * "/experiment enable" or "/experiment disable". Now: mining the game's floors and walls.
+	 */
+	public static final net.minecraft.world.level.gamerules.GameRule<Boolean> EXPERIMENTS =
+		net.fabricmc.fabric.api.gamerule.v1.GameRuleBuilder.forBoolean(false)
+			.category(net.minecraft.world.level.gamerules.GameRuleCategory.PLAYER)
+			.buildAndRegister(net.minecraft.resources.Identifier.withDefaultNamespace("experiment_block_breaking"));
+
+	/** Whether the experimental features are on (in this server's world). */
+	public static boolean experiments(net.minecraft.server.MinecraftServer server) {
+		return server != null && server.overworld().getGameRules().get(EXPERIMENTS);
+	}
+
+	/**
+	 * MiSide: Steve may use what the game says can't be used right now (a button that is
+	 * switched off, a station that isn't ready). Off by default.
+	 */
+	public static final net.minecraft.world.level.gamerules.GameRule<Boolean> ALLOW_CHEATING =
+		net.fabricmc.fabric.api.gamerule.v1.GameRuleBuilder.forBoolean(false)
+			.category(net.minecraft.world.level.gamerules.GameRuleCategory.PLAYER)
+			.buildAndRegister(net.minecraft.resources.Identifier.withDefaultNamespace("allow_cheating"));
+
+	/** MiSide: the player crawls (sneaking into a vent); both sides keep the pose. */
+	public static volatile boolean crawling;
+
+	/** MiSide: a water bucket scoops up a character, like a fish. */
+	public static final net.minecraft.world.level.gamerules.GameRule<Boolean> ALLOW_CHARACTER_WATER_BUCKET =
+		net.fabricmc.fabric.api.gamerule.v1.GameRuleBuilder.forBoolean(true)
+			.category(net.minecraft.world.level.gamerules.GameRuleCategory.PLAYER)
+			.buildAndRegister(net.minecraft.resources.Identifier.withDefaultNamespace("allow_character_water_bucket"));
+
+	/** The bucket a scooped-up MiSide character is in: its name, and the host's number for it. */
+	public static net.minecraft.world.item.ItemStack tokenBucket(int id, String name) {
+		var bucket = new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.WATER_BUCKET);
+		bucket.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, net.minecraft.network.chat.Component.literal("Bucket of " + name));
+		picture(bucket, "bucket_" + castKey(name));
+		bucket.set(net.minecraft.core.component.DataComponents.ENCHANTMENT_GLINT_OVERRIDE, true);
+		var tag = new net.minecraft.nbt.CompoundTag();
+		tag.putInt(TOKEN_KEY, id);
+		bucket.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(tag));
+		return bucket;
+	}
+
+	/** Awards one of the mod's own advancements (data/skycraft/advancement/tricks) to every player. */
+	public static void award(net.minecraft.server.MinecraftServer server, String trick) {
+		if (server == null) {
+			return;
+		}
+		var advancement = server.getAdvancements().get(net.minecraft.resources.Identifier.fromNamespaceAndPath(MOD_ID, "tricks/" + trick));
+		if (advancement == null) {
+			return;
+		}
+		for (var player : server.getPlayerList().getPlayers()) {
+			player.getAdvancements().award(advancement, "done");
+		}
+	}
+
+
+	/** The cast as the chat and the items name them, by command name. */
+	private static final java.util.Map<String, String> CAST_NAMES = java.util.Map.ofEntries(
+		java.util.Map.entry("mita", "Mita"), java.util.Map.entry("kind", "Kind Mita"), java.util.Map.entry("cappie", "Cappie"),
+		java.util.Map.entry("mila", "Mila"), java.util.Map.entry("short_hair", "Short-Haired Mita"),
+		java.util.Map.entry("sleepy", "Sleepy Mita"), java.util.Map.entry("chibi", "Chibi Mita"));
+	private static final String SUMMON_KEY = "skycraft_summon";
+
+	/**
+	 * A spawn egg (or bucket) from the MiSide creative tab: using it summons that character in
+	 * front of the player, like "/summon mita". Paper underneath (a real spawn egg would hatch its
+	 * own mob if this ever missed), with the egg's picture.
+	 */
+	public static net.minecraft.world.item.ItemStack summonItem(String name, boolean bucket) {
+		var stack = new net.minecraft.world.item.ItemStack(bucket ? net.minecraft.world.item.Items.WATER_BUCKET : net.minecraft.world.item.Items.PAPER);
+		String shown = CAST_NAMES.getOrDefault(name, name);
+		stack.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, net.minecraft.network.chat.Component.literal(bucket ? "Bucket of " + shown : shown + " Spawn Egg"));
+		picture(stack, (bucket ? "bucket_" : "egg_") + castKey(name));
+		var tag = new net.minecraft.nbt.CompoundTag();
+		tag.putString(SUMMON_KEY, name);
+		stack.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(tag));
+		return stack;
+	}
+
+	private static String summonOf(net.minecraft.world.item.ItemStack stack) {
+		var data = stack.get(net.minecraft.core.component.DataComponents.CUSTOM_DATA);
+		return data == null ? "" : data.copyTag().getStringOr(SUMMON_KEY, "");
+	}
+
+	/** Uses a summoning egg or bucket: the host makes that character; true if it was one. */
+	private static boolean useSummon(net.minecraft.world.entity.player.Player player, net.minecraft.world.InteractionHand hand) {
+		var stack = player.getItemInHand(hand);
+		String name = summonOf(stack);
+		if (name.isEmpty()) {
+			return false;
+		}
+		if (!player.level().isClientSide()) {
+			int id = java.util.Arrays.asList(dev.skycraft.link.Proto.HOST_CHARACTERS).indexOf(name) + 1;
+			if (id > 0 && dev.skycraft.link.SkyLink.active()) {
+				dev.skycraft.link.SkyLink.pushEvent(dev.skycraft.link.Proto.EV_COMMAND, id, 0, 0, 0, 0, 1);
+				LOG.info("MiSideCraft: {} summoned from {}", name, stack.getHoverName().getString());
+			}
+			if (!player.getAbilities().instabuild) {
+				boolean bucket = stack.is(net.minecraft.world.item.Items.WATER_BUCKET);
+				stack.shrink(1);
+				if (bucket) {
+					player.getInventory().add(new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.WATER_BUCKET));
+				}
+			}
+		}
+		return true;
+	}
+
+	/** Which of the mod's pictures fits a MiSide character's name ("Mita Kind" -> kind). */
+	private static String castKey(String name) {
+		String lower = name.toLowerCase(java.util.Locale.ROOT);
+		for (String key : new String[] { "kind", "cappie", "mila", "short", "sleepy", "chibi", "mita" }) {
+			if (lower.contains(key)) {
+				return key.equals("short") ? "short_hair" : key;
+			}
+		}
+		return "character";
+	}
+
+	private static void picture(net.minecraft.world.item.ItemStack stack, String model) {
+		stack.set(net.minecraft.core.component.DataComponents.ITEM_MODEL, net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", model));
+	}
+
+	/** The spawn egg of a MiSide character (creative pick): its name, and the host's number for it. */
+	public static net.minecraft.world.item.ItemStack tokenEgg(int id, String name) {
+		var egg = new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.POLAR_BEAR_SPAWN_EGG);
+		egg.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, net.minecraft.network.chat.Component.literal(name + " Spawn Egg"));
+		picture(egg, "egg_" + castKey(name));
+		var tag = new net.minecraft.nbt.CompoundTag();
+		tag.putInt(TOKEN_KEY, id);
+		egg.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(tag));
+		return egg;
+	}
+
+	/** The paper a broken MiSide object leaves: its name, and the host's number for it. */
+	public static net.minecraft.world.item.ItemStack tokenPaper(int id, String name) {
+		var paper = new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.PAPER);
+		paper.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, net.minecraft.network.chat.Component.literal(name));
+		picture(paper, "object");
+		var tag = new net.minecraft.nbt.CompoundTag();
+		tag.putInt(TOKEN_KEY, id);
+		paper.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(tag));
+		return paper;
+	}
+
+	public static final String TOKEN_KEY = "skycraft_token";
+
+	/** The host's number on a broken-object paper, or 0. */
+	public static int tokenOf(net.minecraft.world.item.ItemStack stack) {
+		var data = stack.get(net.minecraft.core.component.DataComponents.CUSTOM_DATA);
+		return data == null ? 0 : data.copyTag().getIntOr(TOKEN_KEY, 0);
+	}
+
+	private static int hostCommand(net.minecraft.commands.CommandSourceStack source, String name, boolean spawn, boolean jockey) {
+		if (jockey) {
+			dev.skycraft.combat.SkyCombat.forceJockey(name, spawn);
+		}
+		return hostCommand(source, name, spawn);
+	}
+
+	private static int hostCommand(net.minecraft.commands.CommandSourceStack source, String name, boolean spawn) {
+		if (!dev.skycraft.link.SkyLink.active()) {
+			source.sendFailure(net.minecraft.network.chat.Component.literal("Not linked to the game."));
+			return 0;
+		}
+		int id = java.util.Arrays.asList(dev.skycraft.link.Proto.HOST_CHARACTERS).indexOf(name) + 1;
+		dev.skycraft.link.SkyLink.pushEvent(dev.skycraft.link.Proto.EV_COMMAND, id, 0, 0, 0, 0, spawn ? 1 : 0);
+		String shown = CAST_NAMES.getOrDefault(name, name);
+		source.sendSuccess(() -> net.minecraft.network.chat.Component.literal(spawn ? "Summoning " + shown + "." : shown + " is on the way."), false);
+		return 1;
+	}
 
 	@Override
 	public void onInitialize() {
 		SkyCombat.init();
+		// (The inverted block stays registered for worlds that have one; holes are mined now.)
+		net.fabricmc.fabric.api.creativetab.v1.CreativeModeTabEvents.modifyOutputEvent(net.minecraft.world.item.CreativeModeTabs.TOOLS_AND_UTILITIES)
+			.register(output -> output.accept(VOID_FILLER));
+		// The MiSide tab: a spawn egg and a bucket for every character, and the mod's tools.
+		net.minecraft.core.Registry.register(net.minecraft.core.registries.BuiltInRegistries.CREATIVE_MODE_TAB,
+			net.minecraft.resources.Identifier.fromNamespaceAndPath("skycraft", "miside"),
+			net.fabricmc.fabric.api.creativetab.v1.FabricCreativeModeTab.builder()
+				.title(net.minecraft.network.chat.Component.literal("MiSide"))
+				.icon(() -> summonItem("mita", false))
+				.displayItems((parameters, output) -> {
+					for (String name : dev.skycraft.link.Proto.HOST_CHARACTERS) {
+						output.accept(summonItem(name, false));
+					}
+					for (String name : dev.skycraft.link.Proto.HOST_CHARACTERS) {
+						output.accept(summonItem(name, true));
+					}
+					output.accept(new net.minecraft.world.item.ItemStack(VOID_FILLER));
+					output.accept(new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.CARVED_PUMPKIN));
+					output.accept(new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.LEAD));
+					output.accept(new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.ELYTRA));
+					output.accept(new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.SHEARS));
+				})
+				.build());
+		// The egg of a character picked up in the host (a Chibi Mita) is only hers: Minecraft never
+		// hatches its own mob from it, and its bucket pours no water. The host puts her down.
+		net.fabricmc.fabric.api.event.player.UseBlockCallback.EVENT.register((player, level, hand, hit) ->
+			tokenOf(player.getItemInHand(hand)) != 0 && !player.getItemInHand(hand).is(net.minecraft.world.item.Items.PAPER)
+				? net.minecraft.world.InteractionResult.FAIL : net.minecraft.world.InteractionResult.PASS);
+		net.fabricmc.fabric.api.event.player.UseItemCallback.EVENT.register((player, level, hand) ->
+			tokenOf(player.getItemInHand(hand)) != 0 && !player.getItemInHand(hand).is(net.minecraft.world.item.Items.PAPER)
+				? net.minecraft.world.InteractionResult.FAIL : net.minecraft.world.InteractionResult.PASS);
+		// Using a summoning egg or bucket, in the air or on a block.
+		net.fabricmc.fabric.api.event.player.UseItemCallback.EVENT.register((player, level, hand) ->
+			useSummon(player, hand) ? net.minecraft.world.InteractionResult.SUCCESS : net.minecraft.world.InteractionResult.PASS);
+		net.fabricmc.fabric.api.event.player.UseBlockCallback.EVENT.register((player, level, hand, hit) ->
+			useSummon(player, hand) ? net.minecraft.world.InteractionResult.SUCCESS : net.minecraft.world.InteractionResult.PASS);
+		// A Void Filler on a hole mined into MiSide: its floor or wall comes back.
+		net.fabricmc.fabric.api.event.player.UseBlockCallback.EVENT.register((player, level, hand, hit) -> {
+			if (!player.getItemInHand(hand).is(VOID_FILLER)) {
+				return net.minecraft.world.InteractionResult.PASS;
+			}
+			if (!level.isClientSide() && level instanceof net.minecraft.server.level.ServerLevel server) {
+				int world = dev.skycraft.link.SkyLink.readSkyStateWorld();
+				var pos = hit.getBlockPos();
+				boolean filled = false;
+				for (var cell : new net.minecraft.core.BlockPos[] { pos.relative(hit.getDirection()), pos, pos.above() }) {
+					if (server.getBlockState(cell).is(INVERTED_BLOCK)) {
+						server.setBlock(cell, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 3);
+						filled = true;
+						break;
+					}
+					if (dev.skycraft.world.SkyDig.fill(server, world, cell)) {
+						filled = true;
+						break;
+					}
+				}
+				LOG.info("MiSideCraft: void filler at {}: {}", pos, filled ? "a hole filled" : "no hole there");
+			}
+			return net.minecraft.world.InteractionResult.SUCCESS;
+		});
+		// Digging deeper: under a broken foundation block there is ground again.
+		net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents.AFTER.register((level, player, pos, state, blockEntity) -> {
+			if (dev.skycraft.world.SkyDig.PASSTHROUGH && state.is(dev.skycraft.world.SkyDig.FOUNDATION) && level instanceof net.minecraft.server.level.ServerLevel server) {
+				// The cell is part of the hole now (drawn as one, walled like one), with ground under it.
+				dev.skycraft.world.SkyDig.markDug(server, dev.skycraft.link.SkyLink.readSkyStateWorld(), pos);
+				dev.skycraft.world.SkyDig.underground(server, pos);
+			}
+		});
+		LOG.info("MiSideCraft: inverted block registered as {}", INVERTED_BLOCK_KEY.identifier());
+		// An inverted block put against the host's floor or wall goes into it (that is where the hole
+		// is wanted), not in front of it like a normal block. The host's surfaces aren't blocks: the
+		// cell that was clicked is air, so the one behind the clicked face is the surface's own.
+		net.fabricmc.fabric.api.event.player.UseBlockCallback.EVENT.register((player, level, hand, hit) -> {
+			var stack = player.getItemInHand(hand);
+			if (!stack.is(INVERTED_ITEM) || !level.getBlockState(hit.getBlockPos()).isAir()) {
+				return net.minecraft.world.InteractionResult.PASS;
+			}
+			var into = hit.getBlockPos().relative(hit.getDirection().getOpposite());
+			if (!level.getBlockState(into).isAir()) {
+				return net.minecraft.world.InteractionResult.PASS;
+			}
+			if (!level.isClientSide()) {
+				level.setBlock(into, INVERTED_BLOCK.defaultBlockState(), 3);
+				if (!player.getAbilities().instabuild) {
+					stack.shrink(1);
+				}
+				LOG.info("MiSideCraft: inverted block put into the host's surface at {}", into);
+			}
+			return net.minecraft.world.InteractionResult.SUCCESS;
+		});
 		dev.skycraft.net.SkyNet.init();
+		SkySettings.init();
 		dev.skycraft.world.SkyDig.init();
+		// Commands for the host game (MiSide): "/mita" or "/tp mita" brings that
+		// character to the player, "/summon mita" makes a new one. One per character. They are
+		// extra branches of Minecraft's own /tp and /summon, so the chat completes them.
+		net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+			// /experiment enable|disable: the buggy features, saved with the world.
+			hideGameRules(dispatcher);
+			// "/experiment enable block_breaking": each experiment by name (completed by the chat).
+			dispatcher.register(net.minecraft.commands.Commands.literal("experiment")
+				.executes(context -> {
+					boolean on = experiments(context.getSource().getServer());
+					context.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(
+						"Experiments: block_breaking (mining Mita's world's floors and walls) is " + (on ? "enabled" : "disabled") + "."), false);
+					return on ? 1 : 0;
+				})
+				.then(net.minecraft.commands.Commands.literal("enable")
+					.then(net.minecraft.commands.Commands.literal("block_breaking").executes(context -> setExperiments(context.getSource(), true))))
+				.then(net.minecraft.commands.Commands.literal("disable")
+					.then(net.minecraft.commands.Commands.literal("block_breaking").executes(context -> setExperiments(context.getSource(), false)))));
+			// /repairworld: every hole in MiSide near the players closed again.
+			dispatcher.register(net.minecraft.commands.Commands.literal("repairworld").executes(context -> {
+				var level = context.getSource().getLevel();
+				int filled = dev.skycraft.world.SkyDig.repairAll(level, 12);
+				LOG.info("MiSideCraft: /repairworld filled {} holes", filled);
+				context.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(
+					filled == 0 ? "No holes nearby." : "Repaired " + filled + " hole" + (filled == 1 ? "" : "s") + " in Mita's world."), false);
+				return filled;
+			}));
+			// /clearworld confirm: everything of Minecraft's near the players gone, as in a new save.
+			dispatcher.register(net.minecraft.commands.Commands.literal("clearworld")
+				.executes(context -> {
+					context.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(
+						"This removes every Minecraft block, mob, item and hole near you. Type /clearworld confirm to do it."), false);
+					return 0;
+				})
+				.then(net.minecraft.commands.Commands.literal("confirm").executes(context -> {
+					int removed = clearWorld(context.getSource().getLevel(), 12);
+					context.getSource().sendSuccess(() -> net.minecraft.network.chat.Component.literal(
+						"Cleared: " + removed + " blocks and things. The MiSide is as it was."), false);
+					return removed;
+				})));
+			for (String name : dev.skycraft.link.Proto.HOST_CHARACTERS) {
+				// "... jockey": it rides a chicken.
+				dispatcher.register(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, false))
+					.then(net.minecraft.commands.Commands.literal("jockey").executes(context -> hostCommand(context.getSource(), name, false, true))));
+				// "tp" only forwards to "teleport": a branch added there is found by both.
+				dispatcher.register(net.minecraft.commands.Commands.literal("teleport")
+					.then(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, false))
+						.then(net.minecraft.commands.Commands.literal("jockey").executes(context -> hostCommand(context.getSource(), name, false, true)))));
+				dispatcher.register(net.minecraft.commands.Commands.literal("summon")
+					.then(net.minecraft.commands.Commands.literal(name).executes(context -> hostCommand(context.getSource(), name, true))
+						.then(net.minecraft.commands.Commands.literal("jockey").executes(context -> hostCommand(context.getSource(), name, true, true)))));
+			}
+		});
 		ServerLifecycleEvents.SERVER_STARTED.register(SkyCraft::configureServer);
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+			// A player who quit on the ride or on a hiding seat comes back sitting on it, with a
+			// horse's jump bar and no legs of their own. Off it, once the vehicle has loaded too.
+			var joined = handler.getPlayer();
+			server.execute(() -> {
+				var vehicle = joined.getVehicle();
+				if (vehicle != null) {
+					joined.stopRiding();
+					if (vehicle instanceof net.minecraft.world.entity.decoration.ArmorStand) {
+						vehicle.discard();
+					}
+					LOG.info("MiSideCraft: {} joined riding {}, taken off it", joined.getName().getString(), vehicle.getName().getString());
+				}
+			});
+			// An empty inventory at spawn is filled again: every kit, as if for the first time.
+			if (handler.getPlayer().getInventory().isEmpty()) {
+				handler.getPlayer().removeTag(KIT2_TAG);
+				handler.getPlayer().removeTag(GUIDE_TAG);
+				handler.getPlayer().removeTag(HOME_KIT_TAG);
+				LOG.info("MiSideCraft: {} spawned with nothing, the kits are given again", handler.getPlayer().getName().getString());
+			}
 			giveStarterKit(handler.getPlayer());
 			giveBuilderKit(handler.getPlayer());
+			giveHomeKit(handler.getPlayer());
+			// Once per player: the guide.
+			if (dev.skycraft.world.SkyDig.PASSTHROUGH && !handler.getPlayer().entityTags().contains(GUIDE_TAG)) {
+				handler.getPlayer().getInventory().add(SkyLoot.guide());
+				handler.getPlayer().addTag(GUIDE_TAG);
+				LOG.info("MiSideCraft: gave {} the guide", handler.getPlayer().getName().getString());
+			} else if (dev.skycraft.world.SkyDig.PASSTHROUGH) {
+				// A guide from before keeps up with what's new (Shift for the vents, 15 Oct).
+				var inventory = handler.getPlayer().getInventory();
+				var fresh = SkyLoot.guide();
+				for (int i = 0; i < inventory.getContainerSize(); i++) {
+					var book = inventory.getItem(i).get(net.minecraft.core.component.DataComponents.WRITTEN_BOOK_CONTENT);
+					if (book != null && book.title().raw().equals(fresh.get(net.minecraft.core.component.DataComponents.WRITTEN_BOOK_CONTENT).title().raw())
+						&& !book.equals(fresh.get(net.minecraft.core.component.DataComponents.WRITTEN_BOOK_CONTENT))) {
+						inventory.setItem(i, fresh.copy());
+						LOG.info("MiSideCraft: {}'s guide brought up to date", handler.getPlayer().getName().getString());
+					}
+				}
+			}
 			dressTestGuest(handler.getPlayer());
 		});
+	}
+
+	/**
+	 * Minecraft's game rules that do nothing in Mita's world (the mod sets them itself, or what they
+	 * govern doesn't happen here) are left out of /gamerule and its completion. They still exist.
+	 */
+	private static final java.util.Set<String> HIDDEN_RULES = java.util.Set.of(
+		"advance_time", "advance_weather", "allow_entering_nether_using_portals", "players_nether_portal_creative_delay",
+		"players_nether_portal_default_delay", "spawn_patrols", "spawn_phantoms", "spawn_wandering_traders", "spawn_wardens",
+		"spawn_mobs", "spawn_monsters", "raids", "players_sleeping_percentage", "immediate_respawn", "player_movement_check",
+		"elytra_movement_check", "spectators_generate_chunks", "locator_bar", "max_snow_accumulation_height", "show_advancement_messages",
+		"forgive_dead_players", "universal_anger", "spread_vines");
+
+	private static void hideGameRules(com.mojang.brigadier.CommandDispatcher<net.minecraft.commands.CommandSourceStack> dispatcher) {
+		if (!dev.skycraft.world.SkyDig.PASSTHROUGH) {
+			return;
+		}
+		var gamerule = dispatcher.getRoot().getChild("gamerule");
+		if (gamerule == null) {
+			return;
+		}
+		int hidden = 0;
+		try {
+			for (String field : new String[] { "children", "literals", "arguments" }) {
+				var f = com.mojang.brigadier.tree.CommandNode.class.getDeclaredField(field);
+				f.setAccessible(true);
+				var map = (java.util.Map<?, ?>) f.get(gamerule);
+				int before = map.size();
+				map.keySet().removeIf(key -> HIDDEN_RULES.contains(key.toString()));
+				if (field.equals("children")) {
+					hidden = before - map.size();
+				}
+			}
+		} catch (ReflectiveOperationException | RuntimeException e) {
+			LOG.warn("MiSideCraft: couldn't hide game rules", e);
+			return;
+		}
+		LOG.info("MiSideCraft: {} of Minecraft's game rules hidden from /gamerule", hidden);
+	}
+
+	private static int setExperiments(net.minecraft.commands.CommandSourceStack source, boolean on) {
+		var server = source.getServer();
+		server.overworld().getGameRules().set(EXPERIMENTS, on, server);
+		LOG.info("MiSideCraft: experimental features {}", on ? "on" : "off");
+		source.sendSuccess(() -> net.minecraft.network.chat.Component.literal(
+			"Experiment block_breaking " + (on ? "enabled" : "disabled") + " (mining Mita's world's floors and walls). This is saved with the world."), false);
+		return 1;
+	}
+
+	/**
+	 * /clearworld confirm: within `chunks` chunks of the players, every Minecraft block goes (fast, no
+	 * neighbour updates: nothing falls or drops), every entity but the players goes (mobs, items,
+	 * the ride, the helpers; the stand-ins come back by themselves), and every hole is closed.
+	 * The players and what they carry stay.
+	 */
+	private static int clearWorld(net.minecraft.server.level.ServerLevel level, int chunks) {
+		int removed = dev.skycraft.world.SkyDig.repairAll(level, chunks);
+		java.util.Set<Long> done = new java.util.HashSet<>();
+		var air = net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
+		for (var player : level.players()) {
+			int cx = player.blockPosition().getX() >> 4, cz = player.blockPosition().getZ() >> 4;
+			for (int x = cx - chunks; x <= cx + chunks; x++) {
+				for (int z = cz - chunks; z <= cz + chunks; z++) {
+					if (!done.add(net.minecraft.world.level.ChunkPos.pack(x, z)) || !level.hasChunk(x, z)) {
+						continue;
+					}
+					var chunk = level.getChunk(x, z);
+					var sections = chunk.getSections();
+					for (int i = 0; i < sections.length; i++) {
+						if (sections[i] == null || sections[i].hasOnlyAir()) {
+							continue;
+						}
+						int baseY = chunk.getSectionYFromSectionIndex(i) << 4;
+						for (int y = 0; y < 16; y++) {
+							for (int zz = 0; zz < 16; zz++) {
+								for (int xx = 0; xx < 16; xx++) {
+									if (!sections[i].getBlockState(xx, y, zz).isAir()) {
+										// 2: tell clients, 16: no neighbour updates, 32: no drops.
+										level.setBlock(new net.minecraft.core.BlockPos((x << 4) + xx, baseY + y, (z << 4) + zz), air, 2 | 16 | 32);
+										removed++;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		java.util.List<net.minecraft.world.entity.Entity> gone = new java.util.ArrayList<>();
+		for (var entity : level.getAllEntities()) {
+			if (!(entity instanceof net.minecraft.world.entity.player.Player)) {
+				gone.add(entity);
+			}
+		}
+		for (var entity : gone) {
+			if (entity.isPassenger()) {
+				entity.stopRiding();
+			}
+			entity.discard();
+			removed++;
+		}
+		LOG.info("MiSideCraft: /clearworld removed {} blocks, entities and holes", removed);
+		return removed;
 	}
 
 	/** The mirror world is a void that only exists to host the player; Skyrim drives time and spawning. */
@@ -47,7 +536,7 @@ public final class SkyCraft implements ModInitializer {
 		rules.set(GameRules.IMMEDIATE_RESPAWN, true, server);
 		rules.set(GameRules.SHOW_ADVANCEMENT_MESSAGES, false, server);
 		server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), "time set noon");
-		LOG.info("SkyCraft: mirror world configured");
+		LOG.info("MiSideCraft: mirror world configured");
 	}
 
 	/**
@@ -69,7 +558,7 @@ public final class SkyCraft implements ModInitializer {
 		for (int i = 0; i < slots.length; i++) {
 			player.setItemSlot(slots[i], new ItemStack(pieces[i][random.nextBoolean() ? 1 : 0]));
 		}
-		LOG.info("SkyCraft: dressed test guest {} in iron and diamond", player.getName().getString());
+		LOG.info("MiSideCraft: dressed test guest {} in iron and diamond", player.getName().getString());
 	}
 
 	private static void giveStarterKit(ServerPlayer player) {
@@ -77,14 +566,14 @@ public final class SkyCraft implements ModInitializer {
 			return;
 		}
 		player.getInventory().add(new ItemStack(Items.DIAMOND_SWORD));
-		player.getInventory().add(new ItemStack(Items.DIAMOND_PICKAXE));
+		player.getInventory().add(dev.skycraft.world.SkyDig.PASSTHROUGH ? sturdyPickaxe(player) : new ItemStack(Items.DIAMOND_PICKAXE));
 		player.getInventory().add(new ItemStack(Items.BOW));
 		player.getInventory().add(new ItemStack(Items.COOKED_BEEF, 32));
 		player.getInventory().add(new ItemStack(Items.OAK_PLANKS, 64));
 		player.getInventory().add(new ItemStack(Items.TORCH, 32));
 		player.getInventory().add(new ItemStack(Items.ARROW, 64));
 		player.setItemSlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND, new ItemStack(Items.SHIELD));
-		LOG.info("SkyCraft: gave starter kit to {}", player.getName().getString());
+		LOG.info("MiSideCraft: gave starter kit to {}", player.getName().getString());
 	}
 
 	/**
@@ -114,7 +603,43 @@ public final class SkyCraft implements ModInitializer {
 		inventory.add(new ItemStack(Items.ARROW, 64));
 		inventory.add(new ItemStack(Items.GOLDEN_APPLE, 4));
 		player.addTag(KIT2_TAG);
-		LOG.info("SkyCraft: gave builder kit to {}", player.getName().getString());
+		LOG.info("MiSideCraft: gave builder kit to {}", player.getName().getString());
+	}
+
+	/**
+	 * Once per player in MiSide: things for Mita's world. A pink bed, a cake and flowers for her home,
+	 * and what living off nothing there needs: water and lava make a cobblestone generator, saplings
+	 * need the dirt. The Void Filler closes holes dug into the game.
+	 */
+	private static void giveHomeKit(ServerPlayer player) {
+		if (!dev.skycraft.world.SkyDig.PASSTHROUGH || player.entityTags().contains(HOME_KIT_TAG)) {
+			return;
+		}
+		var inventory = player.getInventory();
+		inventory.add(new ItemStack(Items.BED.pink()));
+		inventory.add(new ItemStack(Items.CAKE));
+		inventory.add(new ItemStack(Items.PINK_TULIP, 8));
+		inventory.add(new ItemStack(Items.WOOL.pink(), 32));
+		inventory.add(new ItemStack(Items.JUKEBOX));
+		inventory.add(new ItemStack(Items.MUSIC_DISC_CAT));
+		inventory.add(new ItemStack(Items.IRON_HOE));
+		inventory.add(new ItemStack(Items.LAVA_BUCKET));
+		inventory.add(new ItemStack(Items.WATER_BUCKET));
+		inventory.add(new ItemStack(Items.OAK_SAPLING, 8));
+		inventory.add(new ItemStack(Items.DIRT, 32));
+		inventory.add(new ItemStack(Items.BONE_MEAL, 16));
+		inventory.add(new ItemStack(VOID_FILLER));
+		player.addTag(HOME_KIT_TAG);
+		LOG.info("MiSideCraft: gave {} the home kit", player.getName().getString());
+	}
+
+	/** The pickaxe for a world that isn't Minecraft's: iron with Unbreaking III (diamond dug too fast). */
+	private static ItemStack sturdyPickaxe(ServerPlayer player) {
+		var pickaxe = new ItemStack(Items.IRON_PICKAXE);
+		var unbreaking = player.level().registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.ENCHANTMENT)
+			.get(net.minecraft.world.item.enchantment.Enchantments.UNBREAKING);
+		unbreaking.ifPresent(holder -> pickaxe.enchant(holder, 3));
+		return pickaxe;
 	}
 
 	private static void equipIfEmpty(ServerPlayer player, EquipmentSlot slot, net.minecraft.world.item.Item item) {

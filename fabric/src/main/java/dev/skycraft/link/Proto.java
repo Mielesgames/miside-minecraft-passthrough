@@ -40,6 +40,33 @@ public final class Proto {
 	// Input types added in v5
 	public static final int IN_HURT = 7;
 	public static final int IN_OPEN_MENU = 8;
+	public static final int IN_SWING = 9;
+	public static final int IN_BREAK_EFFECT = 10;
+	public static final int IN_TOKEN_NAME = 11;
+	public static final int IN_DROP_TOKEN = 12;
+	public static final int IN_USE_TOKEN = 13;
+	public static final int IN_MOUNT_RIDE = 14;
+	public static final int IN_HIDE = 15;
+	public static final int IN_BUCKET_TOKEN = 16;
+	public static final int IN_CHAT_TEXT = 17;
+	public static final int IN_CHAT_SAY = 18;
+	public static final int IN_PICK_TOKEN = 19;
+	public static final int IN_LEASH = 20;
+	public static final int IN_SHEAR = 21;
+	public static final int IN_ACHIEVEMENT_TEXT = 22;
+	public static final int IN_ACHIEVEMENT_DONE = 23;
+	public static final int IN_WEAR_PUMPKIN = 24;
+	public static final int IN_LOOT_CHEST = 25;
+	public static final int IN_AWARD = 26;
+	public static final int IN_ENDER_PUFF = 27;
+	public static final int IN_SAVE_SLOT_TEXT = 28;
+	public static final int IN_SAVE_SLOT = 29;
+	public static final int IN_RIDE_POS = 30;
+	public static final int IN_FORGET_REGIONS = 31;
+	public static final int IN_GAME_ITEMS_BEGIN = 32;
+	public static final int IN_GAME_ITEM_TEXT = 33;
+	public static final int IN_GAME_ITEM = 34;
+	public static final int IN_GAME_ITEMS_END = 35;
 	public static final int HURT_MELEE = 0;
 	public static final int HURT_PROJECTILE = 1;
 	public static final int HURT_MAGIC = 2;
@@ -69,6 +96,27 @@ public final class Proto {
 	public static final int EV_EXPLOSION = 3;
 	public static final int EV_ARROW_STUCK = 4;
 	public static final int EV_SKILL_USE = 5;
+	public static final int EV_COMMAND = 6;
+	public static final int EV_REDSTONE = 7;
+	public static final int EV_ACTOR_AT = 8;
+	public static final int EV_LEAD_POST = 9;
+	public static final int EV_ACTOR_PUSH = 10;
+	public static final int EV_ACTOR_WINGS = 11;
+	public static final int EV_LEASH = 12;
+	public static final int EV_PREVIEW = 13;
+	public static final int EV_ACTOR_BLIND = 14;
+	public static final int EV_MENU = 15;
+	public static final int EV_SETTING = 18;
+	// EV_SETTING's options (formId); flags = the value's index (see SkySettings).
+	public static final int SETTING_MITA = 1;
+	public static final int SETTING_NPCS = 2;
+	public static final int SETTING_DOORS = 3;
+	public static final int SETTING_PHYSICS = 4;
+	public static final int SETTING_BLOCK_BREAKING = 5;
+	public static final int EV_SQUASH = 16;
+	public static final int EV_CREDITS = 17;
+	/** Names for EV_COMMAND's formId (HostCharacter in the header): index + 1. */
+	public static final String[] HOST_CHARACTERS = { "mita", "kind", "cappie", "mila", "short_hair", "sleepy", "chibi" };
 	// Skyrim skills (ActorValue) Minecraft reports use of; weapon skills come from EV_HIT_ACTOR.
 	public static final int SKILL_BLOCK = 9;
 	public static final int SKILL_SMITHING = 10;
@@ -118,6 +166,7 @@ public final class Proto {
 	public static final int REN_RAGDOLL = 9;
 	public static final int REN_SOLIDS = 10;
 	public static final int REN_DUG = 11;
+	public static final int REN_SHAPES = 12;
 	public static final int PART_HEAD = 1, PART_BODY = 2, PART_RIGHT_ARM = 3, PART_LEFT_ARM = 4, PART_RIGHT_LEG = 5, PART_LEFT_LEG = 6;
 	public static final int LIGHT_STEADY = 0, LIGHT_FLAME = 1, LIGHT_LAVA = 2;
 	public static final int REN_VERTEX_BYTES = 32;
@@ -148,6 +197,7 @@ public final class Proto {
 	public static final int SKY_IN_GAME = 1;
 	public static final int SKY_MENU_OPEN = 1 << 1;
 	public static final int SKY_LOADING = 1 << 2;
+	public static final int SKY_HOST_DRIVES = 1 << 3;
 
 	// McState (relative to OFF_MC_STATE)
 	public static final long MS_SEQ = 0x00;
@@ -165,6 +215,7 @@ public final class Proto {
 	public static final long MS_FOV = 0x40;
 	public static final long MS_BOB_PHASE = 0x44;
 	public static final long MS_BOB_AMOUNT = 0x48;
+	public static final long MS_HELD_TOKEN = 0x4C;
 	public static final long MS_EYE_X = 0x50;
 	public static final long MS_EYE_Y = 0x58;
 	public static final long MS_EYE_Z = 0x60;
@@ -189,6 +240,26 @@ public final class Proto {
 	public static final int MC_DEAD = 1 << 5;
 	public static final int MC_SWIMMING = 1 << 6;
 	public static final int MC_FLYING = 1 << 7;
+	public static final int MC_SPECTATOR = 1 << 8;
+	public static final int MC_NIGHT_VISION = 1 << 9;
+	public static final int MC_CREATIVE = 1 << 10;
+	public static final int MC_HOLDS_SWORD = 1 << 11;
+	public static final int MC_HOLDS_FLIP_TAG = 1 << 12;
+	public static final int MC_DOORS_LOCKED = 1 << 13;
+	public static final int MC_RIDING_HOST = 1 << 14;
+	public static final int MC_HOLDS_LEAD = 1 << 15;
+	public static final int MC_HIDING = 1 << 16;
+	public static final int MC_HOLDS_BUCKET = 1 << 17;
+	public static final int MC_SCOPING = 1 << 18;
+	public static final int MC_BLOCKING = 1 << 19;
+	public static final int MC_HOLDS_SHEARS = 1 << 20;
+	public static final int MC_PUMPKIN = 1 << 21;
+	public static final int MC_HOLDS_PUMPKIN = 1 << 22;
+	public static final int MC_PAUSE_MENU = 1 << 23;
+	public static final int MC_HOLDS_JEB_TAG = 1 << 24;
+	public static final int MC_ALLOW_CHEATING = 1 << 25;
+	public static final int MC_SLOT_READY = 1 << 26;
+	public static final int MC_RIDING = 1 << 27;
 
 	// Overlay
 	public static final long OC_STATE = 0x00;

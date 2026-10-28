@@ -18,11 +18,29 @@ import org.lwjgl.sdl.SDLVideo;
  */
 public final class SkyClient {
 	private static final boolean SHOW_WINDOW = Boolean.getBoolean("skycraft.showWindow");
+	// private static final boolean SHOW_WINDOW = true;
 	// Started by Skyrim (SkyCraft's bundled instance passes -Dskycraft.startHidden=true): no window and
 	// no title-screen music from the first frame, even while Skyrim is paused (Alt-Tabbed) and the
 	// two haven't linked up yet. Otherwise the window only goes once Skyrim is there.
 	private static final boolean START_HIDDEN = Boolean.getBoolean("skycraft.startHidden");
+	// Passthrough mode: the other game (MiSide) sends no collision data, so there is nothing
+	// to wait for and no ground to stand on. Minecraft decides X/Z, the other game decides height.
+	// Enabled with -Dskycraft.passthrough=true or the environment variable SKYCRAFT_PASSTHROUGH=1
+	// (the MiSide mod sets that one when it starts Minecraft).
+	private static final boolean PASSTHROUGH = Boolean.getBoolean("skycraft.passthrough")
+		|| "1".equals(System.getenv("SKYCRAFT_PASSTHROUGH"));
+
+	static {
+		if (PASSTHROUGH) {
+			SkyCraft.LOG.info("MiSideCraft: passthrough mode (no the game collision; height comes from the host game)");
+		}
+	}
 	private static boolean startedHidden;
+
+	/** Linked to a host game that sends its geometry as quarter-block cells (MiSide). */
+	public static boolean passthrough() {
+		return PASSTHROUGH;
+	}
 
 	private static final SkyLink.SkyState sky = new SkyLink.SkyState();
 	private static final SkyLink.McState mc = new SkyLink.McState();
@@ -35,6 +53,9 @@ public final class SkyClient {
 	private static int lastTeleportSeq = -1;
 	private static int teleportAck;
 	private static boolean teleportPending;
+	// Passthrough mode: where the player is parked while there is no host player to follow.
+	private static Vec3 passthroughHold;
+	private static int nightCheck;
 	private static LocalPlayer lastPlayer;
 	private static Vec3 holdPos;
 	private static Vec3 unlinkedHold;
@@ -70,6 +91,7 @@ public final class SkyClient {
 	public static void beginFrame() {
 		SkyLink.poll();
 		quitWithSkyrim(Minecraft.getInstance());
+		startGameIfAlone();
 		if (START_HIDDEN && !startedHidden) {
 			startedHidden = true;
 			Minecraft minecraft = Minecraft.getInstance();
@@ -86,7 +108,7 @@ public final class SkyClient {
 		}
 		if (nowLinked != linked) {
 			linked = nowLinked;
-			SkyCraft.LOG.info("SkyCraft: Skyrim link {}", linked ? "up" : "down");
+			SkyCraft.LOG.info("MiSideCraft: the game link {}", linked ? "up" : "down");
 			if (linked) {
 				tookOver = true;
 				unlinkedHold = null;
@@ -156,12 +178,35 @@ public final class SkyClient {
 	private static final long STARTED_AT = System.currentTimeMillis();
 	private static boolean gaveUpWaiting;
 
+	/**
+	 * Minecraft started on its own (not by MiSide): after a few seconds without the game,
+	 * Steam starts it (app 2527500), which then takes this Minecraft over. -Dskycraft.startGame=false
+	 * leaves it alone.
+	 */
+	private static boolean gameStartAsked;
+
+	private static void startGameIfAlone() {
+		if (!PASSTHROUGH || gameStartAsked || System.currentTimeMillis() - STARTED_AT < 8000) {
+			return;
+		}
+		gameStartAsked = true;
+		if (SkyLink.skyrimPid() != 0 || !Boolean.parseBoolean(System.getProperty("skycraft.startGame", "true"))) {
+			return;
+		}
+		try {
+			new ProcessBuilder("cmd", "/c", "start", "", "steam://rungameid/2527500").start();
+			SkyCraft.LOG.info("MiSideCraft: Minecraft was started on its own; starting MiSide through Steam");
+		} catch (Exception e) {
+			SkyCraft.LOG.warn("MiSideCraft: couldn't start MiSide through Steam", e);
+		}
+	}
+
 	private static void quitWithSkyrim(Minecraft minecraft) {
 		int pid = SkyLink.skyrimPid();
 		long now = System.currentTimeMillis();
 		if (QUIT_WITH_SKYRIM && START_HIDDEN && pid == 0 && !tookOver && !gaveUpWaiting && now - STARTED_AT > NEVER_CONNECTED_QUIT_MS) {
 			gaveUpWaiting = true;
-			SkyCraft.LOG.warn("SkyCraft: started hidden but Skyrim never connected in {} minutes; quitting", NEVER_CONNECTED_QUIT_MS / 60000);
+			SkyCraft.LOG.warn("MiSideCraft: started hidden but the game never connected in {} minutes; quitting", NEVER_CONNECTED_QUIT_MS / 60000);
 			minecraft.stop();
 			return;
 		}
@@ -176,7 +221,7 @@ public final class SkyClient {
 		if (skyrimGoneSince == 0) {
 			skyrimGoneSince = now;
 		} else if (now - skyrimGoneSince > 5000) {
-			SkyCraft.LOG.info("SkyCraft: Skyrim (pid {}) has closed; saving and quitting", pid);
+			SkyCraft.LOG.info("MiSideCraft: the game (pid {}) has closed; saving and quitting", pid);
 			minecraft.stop();
 		}
 	}
@@ -188,6 +233,7 @@ public final class SkyClient {
 		SkyDigClient.tick(minecraft);
 		freezeWhileUnlinked(minecraft);
 		holdUntilReady(minecraft);
+		passthroughPhysics(minecraft);
 		publishTick(minecraft);
 	}
 
@@ -259,6 +305,12 @@ public final class SkyClient {
 		if (!linked || player == null) {
 			return;
 		}
+		if (PASSTHROUGH && sky.hostDrives()) {
+			// The host game walks its own player on its own ground: nothing to wait for.
+			holdPos = null;
+			holdSince = 0;
+			return;
+		}
 		if (!sky.inGame() || sky.loading()) {
 			// Skyrim is on its main menu or a loading screen: park the player where they are.
 			if (holdPos == null) {
@@ -285,7 +337,7 @@ public final class SkyClient {
 			if (safe.y != holdPos.y) {
 				player.setPos(safe.x, safe.y, safe.z);
 				player.yo = safe.y;
-				SkyCraft.LOG.info("SkyCraft: lifted player {} blocks out of the ground", String.format("%.3f", safe.y - holdPos.y));
+				SkyCraft.LOG.info("MiSideCraft: lifted player {} blocks out of the ground", String.format("%.3f", safe.y - holdPos.y));
 			}
 			holdPos = null;
 			return;
@@ -295,6 +347,195 @@ public final class SkyClient {
 		player.xo = holdPos.x;
 		player.yo = holdPos.y;
 		player.zo = holdPos.z;
+		player.resetFallDistance();
+	}
+
+	/**
+	 * Passthrough mode (MiSide). While the host game drives, its player walks on its own
+	 * ground with its own physics and ours is pinned to it. While Minecraft drives, the host sends
+	 * its collision and everything is Minecraft's normal physics: nothing to do here.
+	 */
+	/**
+	 * Sneaking into a gap too low to sneak through (a vent) crawls, like Minecraft does under a
+	 * trapdoor: Shift held, the game's geometry in the way of a crouching body half a block ahead
+	 * but not of a crawling one. Once crawling it stays so until there is room to stand up. Flying
+	 * never crawls.
+	 */
+	private static int crawlRoomTicks;
+
+	private static void crawlIntoVents(LocalPlayer player) {
+		boolean was = dev.skycraft.SkyCraft.crawling;
+		boolean now = false;
+		if (!player.getAbilities().flying && !player.isPassenger() && !player.isSpectator()) {
+			var feet = player.position();
+			var crouch = player.getDimensions(net.minecraft.world.entity.Pose.CROUCHING);
+			var crawl = player.getDimensions(net.minecraft.world.entity.Pose.SWIMMING);
+			var look = net.minecraft.world.phys.Vec3.directionFromRotation(0.0F, player.getYRot()).scale(0.5);
+			var ahead = feet.add(look);
+			boolean shift = player.isShiftKeyDown();
+			var standHere = player.getDimensions(net.minecraft.world.entity.Pose.STANDING).makeBoundingBox(feet).deflate(0.05);
+			// Crawling ends only with room to stand up (known geometry, half a second of it),
+			// Shift or not: getting up into a vent's ceiling or its entrance blocker
+			// (MOD_VentTransitionBlocker, at head height) put Steve on top of the vent (15 Oct).
+			boolean roomToStand = SkyCollision.isKnown(standHere.inflate(0.5)) && !SkyCollision.gameBlocks(standHere);
+			crawlRoomTicks = roomToStand ? crawlRoomTicks + 1 : 0;
+			if (shift && !was) {
+				now = SkyCollision.gameBlocks(crouch.makeBoundingBox(ahead).deflate(0.05))
+					&& !SkyCollision.gameBlocks(crawl.makeBoundingBox(ahead).deflate(0.05));
+			} else if (was) {
+				now = crawlRoomTicks < 10;
+			}
+		}
+		if (now != was) {
+			dev.skycraft.SkyCraft.crawling = now;
+			dev.skycraft.SkyCraft.LOG.info("MiSideCraft: {} crawling", now ? "started" : "stopped");
+		}
+	}
+
+	private static void passthroughPhysics(Minecraft minecraft) {
+		LocalPlayer player = minecraft.player;
+		if (!PASSTHROUGH || !linked || player == null) {
+			return;
+		}
+		reportRedstone(minecraft, player);
+		crawlIntoVents(player);
+		footsteps(minecraft, player);
+		GameAchievements.tick(minecraft);
+		// Minecraft's own pause screen (its Escape, or losing focus) is MiSide's menu here.
+		if (minecraft.gui.screen() instanceof net.minecraft.client.gui.screens.PauseScreen) {
+			minecraft.gui.setScreen(new GameMenu());
+		}
+		if (player.isDeadOrDying()) {
+			// Nothing here is meant to kill the player, and the death screen can't be seen: get up again.
+			player.respawn();
+			passthroughHold = null;
+			return;
+		}
+		if (!sky.inGame() || sky.loading()) {
+			// No host player to follow yet (menu, intro, cutscene) and no ground to stand on: stay put,
+			// or the player falls into the void and dies over and over.
+			if (passthroughHold == null) {
+				Vec3 pos = player.position();
+				passthroughHold = new Vec3(pos.x, Math.max(pos.y, 64.0), pos.z);
+			}
+			pin(player, passthroughHold.x, passthroughHold.y, passthroughHold.z);
+			return;
+		}
+		passthroughHold = null;
+		// On the hiding seat the player is a passenger: the seat holds them, not the pin.
+		if (sky.hostDrives() && !teleportPending && !(player.getVehicle() instanceof net.minecraft.world.entity.decoration.ArmorStand)) {
+			pin(player, sky.x, sky.y, sky.z);
+		}
+	}
+
+	private static double stepDistance;
+	private static double stepX, stepZ;
+
+	/**
+	 * Footsteps on MiSide's floors. Minecraft plays a step from the block under the feet,
+	 * and the game's floor is air to it: so here, a stone step every 1.6 blocks walked on the game's
+	 * floor (Minecraft's own pace), none when sneaking or in the air.
+	 */
+	private static void footsteps(Minecraft minecraft, LocalPlayer player) {
+		double dx = player.getX() - stepX, dz = player.getZ() - stepZ;
+		stepX = player.getX();
+		stepZ = player.getZ();
+		if (!player.onGround() || player.isShiftKeyDown() || player.isPassenger() || player.getAbilities().flying) {
+			return;
+		}
+		var under = net.minecraft.core.BlockPos.containing(player.getX(), player.getY() - 0.2, player.getZ());
+		// A Minecraft block there makes its own sound.
+		if (!player.level().getBlockState(under).isAir()) {
+			return;
+		}
+		if (!dev.skycraft.world.SkyCollision.hasGeometry(under) && !dev.skycraft.world.SkyCollision.hasGeometry(under.above())) {
+			return;
+		}
+		double moved = Math.sqrt(dx * dx + dz * dz);
+		if (moved > 2.0) {
+			return; // a teleport, not a step
+		}
+		stepDistance += moved;
+		if (stepDistance < 1.6) {
+			return;
+		}
+		stepDistance = 0.0;
+		var sound = net.minecraft.world.level.block.SoundType.DEEPSLATE_TILES;
+		player.playSound(sound.getStepSound(), sound.getVolume() * 0.15F, sound.getPitch());
+	}
+
+	// Redstone sources that are on, as the host game was last told.
+	private static final it.unimi.dsi.fastutil.longs.LongOpenHashSet POWERED = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+	private static int redstoneTick;
+
+	/**
+	 * MiSide's doors answer to Minecraft's redstone: every powered source around the player
+	 * (a lever, a pressed button or plate, lit dust, a redstone block or torch) is reported when it
+	 * switches, and the host opens the doors near it.
+	 */
+	private static void reportRedstone(Minecraft minecraft, LocalPlayer player) {
+		if (redstoneTick++ % 5 != 0 || minecraft.level == null) {
+			return;
+		}
+		var level = minecraft.level;
+		var now = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+		net.minecraft.core.BlockPos centre = player.blockPosition();
+		net.minecraft.core.BlockPos.MutableBlockPos pos = new net.minecraft.core.BlockPos.MutableBlockPos();
+		for (int dy = -6; dy <= 6; dy++) {
+			for (int dz = -16; dz <= 16; dz++) {
+				for (int dx = -16; dx <= 16; dx++) {
+					pos.set(centre.getX() + dx, centre.getY() + dy, centre.getZ() + dz);
+					var state = level.getBlockState(pos);
+					if (!state.isAir() && powers(state)) {
+						now.add(pos.asLong());
+					}
+				}
+			}
+		}
+		for (long key : now) {
+			if (POWERED.add(key)) {
+				SkyLink.pushEvent(Proto.EV_REDSTONE, 0, net.minecraft.core.BlockPos.getX(key), net.minecraft.core.BlockPos.getY(key), net.minecraft.core.BlockPos.getZ(key), 0, 1);
+			}
+		}
+		var it = POWERED.iterator();
+		while (it.hasNext()) {
+			long key = it.nextLong();
+			if (!now.contains(key)) {
+				it.remove();
+				SkyLink.pushEvent(Proto.EV_REDSTONE, 0, net.minecraft.core.BlockPos.getX(key), net.minecraft.core.BlockPos.getY(key), net.minecraft.core.BlockPos.getZ(key), 0, 0);
+			}
+		}
+	}
+
+	private static boolean powers(net.minecraft.world.level.block.state.BlockState state) {
+		if (state.is(net.minecraft.world.level.block.Blocks.REDSTONE_BLOCK)) {
+			return true;
+		}
+		// Doors, trapdoors and gates are powered themselves when something else powers them: not a source.
+		if (state.getBlock() instanceof net.minecraft.world.level.block.DoorBlock
+			|| state.getBlock() instanceof net.minecraft.world.level.block.TrapDoorBlock
+			|| state.getBlock() instanceof net.minecraft.world.level.block.FenceGateBlock) {
+			return false;
+		}
+		if (state.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.POWERED)
+			&& state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.POWERED)) {
+			return true;
+		}
+		if (state.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.POWER)
+			&& state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.POWER) > 0) {
+			return true;
+		}
+		return (state.is(net.minecraft.world.level.block.Blocks.REDSTONE_TORCH) || state.is(net.minecraft.world.level.block.Blocks.REDSTONE_WALL_TORCH))
+			&& state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.LIT);
+	}
+
+	private static void pin(LocalPlayer player, double x, double y, double z) {
+		player.setPos(x, y, z);
+		player.xo = x;
+		player.yo = y;
+		player.zo = z;
+		player.setDeltaMovement(Vec3.ZERO);
+		player.setOnGround(true);
 		player.resetFallDistance();
 	}
 
@@ -322,7 +563,7 @@ public final class SkyClient {
 				}
 			});
 		}
-		SkyCraft.LOG.info("SkyCraft: teleported to {} {} {}", x, y, z);
+		SkyCraft.LOG.info("MiSideCraft: teleported to {} {} {}", x, y, z);
 	}
 
 	/** After GameRenderer.render(): report the player to Skyrim and ship the overlay frame. */
@@ -355,6 +596,70 @@ public final class SkyClient {
 			}
 			if (player.getAbilities().flying) {
 				flags |= Proto.MC_FLYING;
+			}
+			if (player.isSpectator()) {
+				flags |= Proto.MC_SPECTATOR;
+			}
+			if (player.hasEffect(net.minecraft.world.effect.MobEffects.NIGHT_VISION)) {
+				flags |= Proto.MC_NIGHT_VISION;
+			}
+			if (player.getAbilities().instabuild) {
+				flags |= Proto.MC_CREATIVE;
+			}
+			if (player.getMainHandItem().is(net.minecraft.tags.ItemTags.SWORDS)) {
+				flags |= Proto.MC_HOLDS_SWORD;
+			}
+			mc.heldToken = dev.skycraft.SkyCraft.tokenOf(player.getMainHandItem());
+			if (player.getVehicle() != null) {
+				flags |= Proto.MC_RIDING;
+			}
+			if (player.getVehicle() instanceof net.minecraft.world.entity.decoration.ArmorStand) {
+				flags |= Proto.MC_HIDING;
+			}
+			if (dev.skycraft.combat.SkyCombat.wearable(player.getMainHandItem()) != null) {
+				flags |= Proto.MC_HOLDS_PUMPKIN;
+			}
+			if (player.getMainHandItem().is(net.minecraft.world.item.Items.SHEARS)) {
+				flags |= Proto.MC_HOLDS_SHEARS;
+			}
+			if (player.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.HEAD).is(net.minecraft.world.item.Items.CARVED_PUMPKIN)) {
+				flags |= Proto.MC_PUMPKIN;
+			}
+			if (player.isBlocking()) {
+				flags |= Proto.MC_BLOCKING;
+			}
+			if (MirrorWorld.slotReady(minecraft)) {
+				flags |= Proto.MC_SLOT_READY;
+			}
+			if (minecraft.gui.screen() instanceof GameMenu) {
+				flags |= Proto.MC_PAUSE_MENU;
+			}
+			if (player.isScoping()) {
+				flags |= Proto.MC_SCOPING;
+			}
+			if (player.getMainHandItem().is(net.minecraft.world.item.Items.LEAD)) {
+				flags |= Proto.MC_HOLDS_LEAD;
+			}
+			var server = minecraft.getSingleplayerServer();
+			if (server != null && !server.overworld().getGameRules().get(dev.skycraft.SkyCraft.ALLOW_OPENING_DOORS)) {
+				flags |= Proto.MC_DOORS_LOCKED;
+			}
+			if (server != null && server.overworld().getGameRules().get(dev.skycraft.SkyCraft.ALLOW_CHEATING)) {
+				flags |= Proto.MC_ALLOW_CHEATING;
+			}
+			// A plain water bucket (not one that already holds a character) scoops one up.
+			if (mc.heldToken == 0 && player.getMainHandItem().is(net.minecraft.world.item.Items.WATER_BUCKET)
+				&& (server == null || server.overworld().getGameRules().get(dev.skycraft.SkyCraft.ALLOW_CHARACTER_WATER_BUCKET))) {
+				flags |= Proto.MC_HOLDS_BUCKET;
+			}
+			if (player.getMainHandItem().is(net.minecraft.world.item.Items.NAME_TAG)) {
+				String tag = player.getMainHandItem().getHoverName().getString();
+				if (tag.equalsIgnoreCase("Dinnerbone") || tag.equalsIgnoreCase("Grumm")) {
+					flags |= Proto.MC_HOLDS_FLIP_TAG;
+				}
+				if (tag.equals("jeb_")) {
+					flags |= Proto.MC_HOLDS_JEB_TAG;
+				}
 			}
 			mc.x = feet.x;
 			mc.y = feet.y;
@@ -392,7 +697,7 @@ public final class SkyClient {
 				WorldExporter.frame(minecraft, minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false));
 			} catch (RuntimeException e) {
 				if (exporterErrors++ < 5) {
-					SkyCraft.LOG.error("SkyCraft: world export failed", e);
+					SkyCraft.LOG.error("MiSideCraft: world export failed", e);
 				}
 			}
 			FrameExporter.capture(minecraft);
@@ -447,7 +752,7 @@ public final class SkyClient {
 		}
 		windowHidden = true;
 		SDLVideo.SDL_HideWindow(minecraft.getWindow().handle());
-		SkyCraft.LOG.info("SkyCraft: game window hidden (run with -Dskycraft.showWindow=true to keep it)");
+		SkyCraft.LOG.info("MiSideCraft: game window hidden (run with -Dskycraft.showWindow=true to keep it)");
 	}
 
 	private static void applyViewportSize(Minecraft minecraft) {
@@ -459,6 +764,6 @@ public final class SkyClient {
 		appliedViewportW = w;
 		appliedViewportH = h;
 		minecraft.getWindow().setWindowed(w, h);
-		SkyCraft.LOG.info("SkyCraft: sizing overlay to Skyrim viewport {}x{}", w, h);
+		SkyCraft.LOG.info("MiSideCraft: sizing overlay to the game viewport {}x{}", w, h);
 	}
 }

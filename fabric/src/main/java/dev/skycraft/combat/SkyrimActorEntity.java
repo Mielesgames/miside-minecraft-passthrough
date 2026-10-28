@@ -168,6 +168,10 @@ public class SkyrimActorEntity extends LivingEntity {
 		// Position and rotation come from Skyrim (SkyCombat); keep hurt timers and fire ticking.
 		this.baseTick();
 		this.setHealth(this.getMaxHealth());
+		// What it wears (a pumpkin, an elytra) goes to the clients, which draw it on the character.
+		if (!this.level().isClientSide()) {
+			((dev.skycraft.mixin.LivingEntityAccessor) this).skycraft$detectEquipmentUpdates();
+		}
 	}
 
 	@Override
@@ -179,9 +183,22 @@ public class SkyrimActorEntity extends LivingEntity {
 	protected void doPush(Entity entity) {
 	}
 
+	/**
+	 * MiSide: the player can't walk or fly through a host character, it is solid to them
+	 * (like a boat). Spectators still pass, and so does everything else.
+	 */
 	@Override
 	public boolean canBeCollidedWith(@Nullable Entity other) {
-		return false;
+		return dev.skycraft.world.SkyDig.PASSTHROUGH && other instanceof net.minecraft.world.entity.player.Player player && !player.isSpectator();
+	}
+
+	/**
+	 * In a boat or minecart it can't be pointed at: the crosshair goes to the vehicle, so the player
+	 * can get in beside it and break it (and the character goes free).
+	 */
+	@Override
+	public boolean isPickable() {
+		return !this.isPassenger() && super.isPickable();
 	}
 
 	@Override

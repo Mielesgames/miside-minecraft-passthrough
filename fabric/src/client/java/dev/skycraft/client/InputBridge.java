@@ -42,7 +42,7 @@ public final class InputBridge {
 				}
 				if (a != 0 && clickLogs++ < 20) {
 					var hit = minecraft.hitResult;
-					dev.skycraft.SkyCraft.LOG.info("SkyCraft: click {} -> {} {} (grabbed {}, screen {})", code, hit == null ? "null" : hit.getType(),
+					dev.skycraft.SkyCraft.LOG.info("MiSideCraft: click {} -> {} {} (grabbed {}, screen {})", code, hit == null ? "null" : hit.getType(),
 						hit instanceof net.minecraft.world.phys.EntityHitResult eh ? eh.getEntity().getName().getString() : hit == null ? "" : hit.getLocation(),
 						minecraft.mouseHandler.isMouseGrabbed(), minecraft.gui.screen());
 				}
@@ -66,13 +66,251 @@ public final class InputBridge {
 			case Proto.IN_OPEN_MENU -> {
 				if (minecraft.gui.screen() == null && minecraft.player != null) {
 					releaseAll();
-					minecraft.gui.setScreen(new PauseScreen(true));
+					// MiSide: its own menu, Minecraft-styled.
+					minecraft.gui.setScreen(SkyClient.passthrough() ? new GameMenu() : new PauseScreen(true));
+				}
+			}
+			case Proto.IN_SWING -> {
+				if (minecraft.player != null) {
+					minecraft.player.swing(net.minecraft.world.InteractionHand.MAIN_HAND, minecraft.player.getMainHandItem().getAttackAnimation(), false);
+				}
+			}
+			case Proto.IN_BREAK_EFFECT -> {
+				// Something of the host game's broke (a cardboard cutout): it goes like a block of planks.
+				if (minecraft.level != null) {
+					var pos = net.minecraft.core.BlockPos.containing(a / 100.0, b / 100.0, c / 100.0);
+					var planks = net.minecraft.world.level.block.Blocks.OAK_PLANKS.defaultBlockState();
+					minecraft.level.addDestroyBlockEffect(pos, planks);
+					minecraft.level.addDestroyBlockEffect(pos.above(), planks);
+					minecraft.level.playLocalSound(pos, net.minecraft.sounds.SoundEvents.WOOD_BREAK, net.minecraft.sounds.SoundSource.BLOCKS, 1.0F, 0.8F, false);
+				}
+			}
+			case Proto.IN_BUCKET_TOKEN -> {
+				// A MiSide character was scooped up: the water bucket in hand now holds it.
+				var name = TOKEN_NAMES.remove(code);
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					String label = name == null || name.isEmpty() ? "Character" : name.toString();
+					var uuid = minecraft.player.getUUID();
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player == null) {
+							return;
+						}
+						var bucket = dev.skycraft.SkyCraft.tokenBucket(code, label);
+						dev.skycraft.SkyCraft.award(server, "bucket");
+						if (player.getMainHandItem().is(net.minecraft.world.item.Items.WATER_BUCKET) && dev.skycraft.SkyCraft.tokenOf(player.getMainHandItem()) == 0) {
+							player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, bucket);
+						} else {
+							player.getInventory().add(bucket);
+						}
+					});
+				}
+			}
+			case Proto.IN_ENDER_PUFF -> {
+				// An character with an ender pearl teleported: the enderman's sound and particles where it was.
+				if (minecraft.level != null) {
+					double x = a / 100.0, y = b / 100.0, z = c / 100.0;
+					minecraft.level.playLocalSound(x, y, z, net.minecraft.sounds.SoundEvents.ENDERMAN_TELEPORT, net.minecraft.sounds.SoundSource.HOSTILE, 1.0F, 1.0F, false);
+					for (int i = 0; i < 32; i++) {
+						minecraft.level.addParticle(net.minecraft.core.particles.ParticleTypes.PORTAL,
+							x + (Math.random() - 0.5), y + Math.random() * 2.0, z + (Math.random() - 0.5),
+							(Math.random() - 0.5) * 2.0, -Math.random(), (Math.random() - 0.5) * 2.0);
+					}
+				}
+			}
+			case Proto.IN_AWARD -> {
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && code == 1) {
+					server.execute(() -> dev.skycraft.SkyCraft.award(server, "rainbow"));
+				}
+			}
+			case Proto.IN_LOOT_CHEST -> {
+				// A room of Mita's world seen for the first time: a chest of loot on its floor.
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					var dimension = minecraft.player.level().dimension();
+					double x = a / 100.0, y = b / 100.0, z = c / 100.0;
+					server.execute(() -> {
+						var level = server.getLevel(dimension);
+						if (level != null) {
+							dev.skycraft.SkyLoot.place(level, x, y, z);
+						}
+					});
+				}
+			}
+			case Proto.IN_WEAR_PUMPKIN -> {
+				// A carved pumpkin given to a MiSide character: on its head it goes.
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					var uuid = minecraft.player.getUUID();
+					int formId = a;
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player != null) {
+							dev.skycraft.combat.SkyCombat.wearPumpkin(player, formId);
+						}
+					});
+				}
+			}
+			case Proto.IN_ACHIEVEMENT_TEXT -> GameAchievements.text(code, a, b, c);
+			case Proto.IN_ACHIEVEMENT_DONE -> GameAchievements.done(minecraft, code, a != 0, b != 0, c);
+			case Proto.IN_SHEAR -> {
+				// Shears on a MiSide character: what its stand-in wears (an elytra) comes off.
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					int formId = a;
+					var uuid = minecraft.player.getUUID();
+					server.execute(() -> dev.skycraft.combat.SkyCombat.shear(server.getPlayerList().getPlayer(uuid), formId));
+				}
+			}
+			case Proto.IN_LEASH -> {
+				// The player used a lead on a MiSide character, or took it off.
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					var uuid = minecraft.player.getUUID();
+					boolean on = code != 0;
+					int formId = a;
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player != null) {
+							dev.skycraft.combat.SkyCombat.leash(player, formId, on);
+						}
+					});
+				}
+			}
+			case Proto.IN_PICK_TOKEN -> {
+				// Creative pick on a MiSide thing: its spawn egg or paper, into the hand.
+				var name = TOKEN_NAMES.remove(code);
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					String label = name == null || name.isEmpty() ? "Object" : name.toString();
+					boolean character = a != 0;
+					var uuid = minecraft.player.getUUID();
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player == null) {
+							return;
+						}
+						var item = character ? dev.skycraft.SkyCraft.tokenEgg(code, label) : dev.skycraft.SkyCraft.tokenPaper(code, label);
+						if (player.getMainHandItem().isEmpty()) {
+							player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, item);
+						} else {
+							player.getInventory().add(item);
+						}
+					});
+				}
+			}
+			case Proto.IN_FORGET_REGIONS -> dev.skycraft.world.SkyCollision.forget(a / 100.0, b / 100.0, c / 100.0, code);
+			case Proto.IN_SAVE_SLOT_TEXT -> {
+				for (int word : new int[] { a, b, c }) {
+					for (int i = 0; i < 4; i++) {
+						int ch = (word >>> (i * 8)) & 0xFF;
+						if (ch != 0) {
+							SAVE_SLOT.append((char) ch);
+						}
+					}
+				}
+			}
+			case Proto.IN_SAVE_SLOT -> {
+				// The MiSide save that is loaded: its own Minecraft world.
+				String save = SAVE_SLOT.toString();
+				SAVE_SLOT.setLength(0);
+				if (!save.isEmpty()) {
+					MirrorWorld.hostSave(minecraft, save, a);
+				}
+			}
+			case Proto.IN_CHAT_TEXT -> {
+				var text = CHAT_LINES.computeIfAbsent(code, k -> new StringBuilder());
+				for (int word : new int[] { a, b, c }) {
+					for (int i = 0; i < 4; i++) {
+						int ch = (word >>> (i * 8)) & 0xFF;
+						if (ch != 0) {
+							text.append((char) ch);
+						}
+					}
+				}
+			}
+			case Proto.IN_CHAT_SAY -> {
+				// Something a MiSide character said (its subtitle): into the chat.
+				var text = CHAT_LINES.remove(code);
+				if (text != null && !text.isEmpty()) {
+					var line = net.minecraft.network.chat.Component.literal(text.toString());
+					// Someone arriving or leaving is yellow, like a player joining.
+					minecraft.gui.hud.getChat().addClientSystemMessage(a == 1 ? line.withStyle(net.minecraft.ChatFormatting.YELLOW) : line);
+				}
+			}
+			case Proto.IN_HIDE -> {
+				// The host player is in a hiding spot (or left it): onto the seat, or the seat goes.
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					var uuid = minecraft.player.getUUID();
+					boolean hide = code != 0;
+					double x = a / 100.0, y = b / 100.0, z = c / 100.0;
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player != null) {
+							dev.skycraft.combat.HidingSeat.set(player, hide, x, y, z);
+						}
+					});
+				}
+			}
+			case Proto.IN_TOKEN_NAME -> {
+				var name = TOKEN_NAMES.computeIfAbsent(code, k -> new StringBuilder());
+				for (int word : new int[] { a, b, c }) {
+					for (int i = 0; i < 4; i++) {
+						int ch = (word >>> (i * 8)) & 0xFF;
+						if (ch != 0) {
+							name.append((char) ch);
+						}
+					}
+				}
+			}
+			case Proto.IN_DROP_TOKEN -> {
+				// A MiSide object broke: its paper drops where it stood, like a block's drop.
+				var name = TOKEN_NAMES.remove(code);
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					String label = name == null || name.isEmpty() ? "Object" : name.toString();
+					double x = a / 100.0, y = b / 100.0, z = c / 100.0;
+					var dimension = minecraft.player.level().dimension();
+					server.execute(() -> {
+						var level = server.getLevel(dimension);
+						if (level != null) {
+							var drop = new net.minecraft.world.entity.item.ItemEntity(level, x, y + 0.5, z, dev.skycraft.SkyCraft.tokenPaper(code, label));
+							drop.setDefaultPickUpDelay();
+							level.addFreshEntity(drop);
+							dev.skycraft.SkyCraft.award(server, "break_object");
+						}
+					});
+				}
+			}
+			case Proto.IN_USE_TOKEN -> {
+				// The object was put back: the paper in the hand is used up (not in creative).
+				var server = minecraft.getSingleplayerServer();
+				if (server != null && minecraft.player != null) {
+					var uuid = minecraft.player.getUUID();
+					server.execute(() -> {
+						var player = server.getPlayerList().getPlayer(uuid);
+						if (player != null && !player.getAbilities().instabuild && dev.skycraft.SkyCraft.tokenOf(player.getMainHandItem()) == code) {
+							if (player.getMainHandItem().is(net.minecraft.world.item.Items.WATER_BUCKET)) {
+								// The character is out; the water stays in the bucket.
+								player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.WATER_BUCKET));
+							} else {
+								player.getMainHandItem().shrink(1);
+							}
+						}
+					});
 				}
 			}
 			default -> {
 			}
 		}
 	}
+
+	private static final java.util.Map<Integer, StringBuilder> TOKEN_NAMES = new java.util.HashMap<>();
+	private static final StringBuilder SAVE_SLOT = new StringBuilder();
+	private static final java.util.Map<Integer, StringBuilder> CHAT_LINES = new java.util.HashMap<>();
 
 	/** Skyrim hit the player: apply it as Minecraft damage on the integrated server (or the host's). */
 	private static void hurt(Minecraft minecraft, int kind, float skyrimDamage, int attacker, int flags) {

@@ -48,7 +48,7 @@ public final class DestructionToggle {
 			SkyDig.destruction = !SkyDig.destruction;
 			b.setMessage(label());
 			save();
-			SkyCraft.LOG.info("SkyCraft: Skyrim destruction {}", SkyDig.destruction ? "on" : "off");
+			SkyCraft.LOG.info("MiSideCraft: Game destruction {}", SkyDig.destruction ? "on" : "off");
 		}).bounds(4, 4, 150, 20).tooltip(Tooltip.create(Component.literal(host
 			? "Mining Skyrim's ground and rocks, and explosions, dig into Skyrim's world. Holes already dug stay either way."
 			: "In a friend's world, their setting decides."))).build();
@@ -57,7 +57,7 @@ public final class DestructionToggle {
 	}
 
 	private static Component label() {
-		return Component.literal("Skyrim destruction: " + (SkyDig.destruction ? "On" : "Off"));
+		return Component.literal("Game destruction: " + (SkyDig.destruction ? "On" : "Off"));
 	}
 
 	private static void load() {
@@ -67,7 +67,7 @@ public final class DestructionToggle {
 		} catch (NoSuchFileException e) {
 			return;
 		} catch (IOException e) {
-			SkyCraft.LOG.warn("SkyCraft: couldn't read {}", file(), e);
+			SkyCraft.LOG.warn("MiSideCraft: couldn't read {}", file(), e);
 			return;
 		}
 		SkyDig.destruction = !"false".equalsIgnoreCase(props.getProperty(KEY, "true").trim());
@@ -87,13 +87,13 @@ public final class DestructionToggle {
 				}
 			}
 			if (!found) {
-				lines.add("# Mining and explosions dig into Skyrim's world (the pause menu's \"Skyrim destruction\" button).");
+				lines.add("# Mining and explosions dig into the game's world (the pause menu's \"Game destruction\" button).");
 				lines.add(line);
 			}
 			Files.createDirectories(file.getParent());
 			Files.write(file, lines);
 		} catch (IOException e) {
-			SkyCraft.LOG.warn("SkyCraft: couldn't save {}", file, e);
+			SkyCraft.LOG.warn("MiSideCraft: couldn't save {}", file, e);
 		}
 	}
 }

@@ -59,6 +59,7 @@ namespace skycraft::proto
 		kSkyInGame = 1u << 0,    // a save is loaded and the player exists
 		kSkyMenuOpen = 1u << 1,  // a Skyrim menu owns input; MC should drop held keys
 		kSkyLoading = 1u << 2,   // loading screen / cell transition in progress
+		kSkyHostDrives = 1u << 3,  // the host game moves its player itself; Minecraft's player just follows
 	};
 
 	// Skyrim's water (lakes, rivers, the sea) around the player, for Minecraft to treat as its own
@@ -100,6 +101,27 @@ namespace skycraft::proto
 		kMcDead = 1u << 5,
 		kMcSwimming = 1u << 6,
 		kMcFlying = 1u << 7,
+		kMcSpectator = 1u << 8,  // spectator mode: flies through everything
+		kMcNightVision = 1u << 9,  // the night vision effect is active
+		kMcCreative = 1u << 10,    // creative mode: breaks things in one hit
+		kMcHoldsSword = 1u << 11,  // a sword in the main hand: in creative it breaks nothing
+		kMcHoldsFlipTag = 1u << 12,  // a name tag named Dinnerbone or Grumm in the main hand
+		kMcDoorsLocked = 1u << 13,   // gamerule allow_opening_doors is off
+		kMcRiding = 1u << 27,       // sits in or on something (a boat, a minecart, a mule): carried, not falling
+		kMcSlotReady = 1u << 26,    // Minecraft has the world of the MiSide save the host last named open
+		kMcAllowCheating = 1u << 25, // gamerule allow_cheating: the game's "you can't use this now" is ignored
+		kMcHoldsJebTag = 1u << 24,   // a name tag called jeb_ in the main hand: right-click makes a host character rainbow
+		kMcPauseMenu = 1u << 23,     // MiSide's pause menu in Minecraft's style is open: the host pauses the game
+		kMcHoldsPumpkin = 1u << 22,  // something a host character can be given to wear in the main hand (a carved pumpkin,
+		                             // ice, frost walker boots): right-click puts it on
+		kMcPumpkin = 1u << 21,       // a carved pumpkin on the head: host characters see the player less far
+		kMcHoldsShears = 1u << 20,   // shears in the main hand: right-click takes a host character's elytra off
+		kMcBlocking = 1u << 19,      // a shield is up: host characters in front bounce off it and can't grab the player
+		kMcScoping = 1u << 18,       // looking through a spyglass: the host zooms its camera in too
+		kMcHoldsBucket = 1u << 17,   // a water bucket in the main hand, and the gamerule lets it scoop up a host character
+		kMcHiding = 1u << 16,        // the player sits on the hiding seat (kInHide); getting off it is leaving the hiding spot
+		kMcHoldsLead = 1u << 15,     // a lead in the main hand: right-click puts a host character on it
+		kMcRidingHost = 1u << 14,    // the player rides a ride: the host keeps a character under the rider
 	};
 
 	struct McState
@@ -116,7 +138,7 @@ namespace skycraft::proto
 		float         fovDeg;         // effective vertical FOV (includes sprint / fluid modifiers)
 		float         bobPhase;       // MC walk-bob phase (interpolated walk distance); 0 if bobbing is off
 		float         bobAmount;      // MC walk-bob amplitude
-		std::uint32_t pad4C;
+		std::uint32_t heldToken;      // MiSide: id of the paper of a broken object in the main hand (0: none)
 		double        eyeX, eyeY, eyeZ;  // MC camera position (interpolated, includes sneak eye lerp)
 
 		// Raw 20 Hz physics ticks, so Skyrim can interpolate on its own frame clock exactly like
@@ -180,6 +202,44 @@ namespace skycraft::proto
 		kInReleaseAll = 6,   // release every held key/button (input focus left MC)
 		kInHurt = 7,         // Skyrim hit the player: code = HurtKind, a = Skyrim damage * 100, b = attacker FormID, c = HurtFlags
 		kInOpenMenu = 8,     // open Minecraft's pause/options menu
+		kInSwing = 9,        // swing the main hand (the player used something in the host game)
+		kInTokenName = 11,   // part of a broken object's name: code = token id, a, b, c = 12 characters (latin-1, 0 = end)
+		kInDropToken = 12,   // drop the paper for a broken object: code = token id, a, b, c = where (Minecraft x 100)
+		kInSaveSlotText = 28,    // part of the loaded save's name: 12 characters in a, b, c
+		kInSaveSlot = 29,        // the save's name is complete; a = 1: it was just started with New Game, 2: the game was saved into it from the save before (same play)
+		kInGameItemsBegin = 32,  // the game's inventory follows (MiSide's items: the bundles)
+		kInGameItemText = 33,    // an item's display name: 12 characters in a, b, c, under code = its index
+		kInGameItem = 34,        // item code is complete: a = its category (EInventoryItemCategory)
+		kInGameItemsEnd = 35,    // the list is complete: code = how many
+		kInForgetRegions = 31,   // the game streamed a big part of the map in: what is known within code blocks of a, b, c (Minecraft x 100) is unknown until scanned again
+		kInRidePos = 30,         // Steve rides something the game moves: its feet at a, b, c (Minecraft x 100); the mule goes there
+		kInEnderPuff = 27,       // a host character teleported like an enderman: its sound and purple particles at a, b, c
+		                         // (Minecraft x 100; sent for where it went from and where it went to)
+		kInAward = 26,           // a trick happened on the host's side: award advancement `code` (1 = rainbow)
+		kInLootChest = 25,       // the player came into a room for the first time: a loot chest goes on the floor at
+		                         // a, b, c (Minecraft x 100; b = the floor's height)
+		kInWearPumpkin = 24,     // what the player holds goes on host character a (its ActorTable id): a pumpkin on its
+		                         // head, ice or frost walker boots on its feet
+		kInAchievementDone = 23, // achievement `code` is complete: a = 1 if the player has it, b = 1 if hidden, c = how many
+		                         // there are. Sent for each once, then again when one is unlocked
+		kInAchievementText = 22, // twelve more characters (a, b, c, latin-1) of achievement code / 4: field code % 4
+		                         // (0 its id, 1 title, 2 description)
+		kInShear = 21,       // shears on host character a (its ActorTable id): its stand-in drops what it wears
+		kInLeash = 20,       // code 1: put Minecraft's lead on the host character a (its ActorTable id), held by the
+		                     // player; code 0: take it off
+		kInPickToken = 19,   // creative pick: give the item that makes copies of a host thing (code = token, named by
+		                     // kInTokenName). a = 1: a character (a spawn egg), 0: an object (its paper)
+		kInChatSay = 18,     // show the text gathered under this code (kInChatText) in the chat; a = 1: in yellow
+		                     // ("... joined the game")
+		kInChatText = 17,    // twelve more characters (a, b, c, latin-1) of a chat line; code = which line
+		kInBucketToken = 16, // a host character was scooped up: the water bucket in hand becomes its bucket
+		                     // (code = token, named by kInTokenName). Using it puts the character back.
+		kInHide = 15,        // code 1: the host player is in a hiding spot at a, b, c (Minecraft x 100): sit the player
+		                     // on an unseen seat there. code 0: out of it again, the seat goes.
+		kInMountRide = 14,   // the player got on something to ride in the host game: onto a mule at a, b, c (Minecraft x 100); code 1: off it again
+		kInUseToken = 13,    // that object was put back: code = token id; one paper of it in the hand is used up
+		kInBreakEffect = 10, // something in the host game broke: block-break particles and sound at
+		                     // a, b, c (Minecraft coordinates x 100), two blocks tall
 	};
 
 	enum HurtKind : std::uint16_t
@@ -247,6 +307,54 @@ namespace skycraft::proto
 		                    // flags = flight pitch (float bits), weapon = arrow texture (0 plain, 1 tipped, 2 spectral)
 		kEvSkillUse = 5,    // the player used a Skyrim skill in Minecraft: formId = Skyrim skill (ActorValue: 9 Block,
 		                    // 10 Smithing, 11 Heavy Armor, 12 Light Armor), a = uses (as Skyrim's AdvanceSkill counts them)
+		kEvActorBlind = 14, // what a host character wears does to it: flags 1 = blind (a carved pumpkin), 2 = slips (ice
+		                    // or frost walker boots on its feet), 4 = stuck (slime or honey), 8 = ender (an ender pearl:
+		                    // teleports like an enderman), 0 = nothing. Repeated
+		                    // every 2 s while it does
+		kEvCredits = 17,    // the player stepped into an end portal: MiSide's credits roll
+		kEvSquash = 16,     // a falling anvil landed on a host character (formId): it is squashed to half its height
+		kEvMenu = 15,       // a button of the pause menu that is the host's: flags 1 = its own menu, 2 = quit to
+		                    // title, 3 = quit the game
+		kEvPreview = 13,    // a ride screen is open: a/b = the preview box's top left, c/d its size, in GUI
+		                    // pixels (the host shows a character there). Every tick while open
+		kEvLeash = 12,      // a host character is on a lead: formId, a/b/c = where the other end is (the player's
+		                    // hand or a fence knot). Every tick while it is; flags 0: the lead is off
+		kEvActorWings = 11, // a dispenser put an elytra on a host character's stand-in (flags 1) or it came off (0)
+		kEvActorPush = 10,  // Minecraft moves a host character: formId, a/b/c = blocks this tick (water, bubble
+		                    // column, towards a villager). flags 1: thrown up instead (slime), 2: it walks there itself,
+		                    // 4: it stands on honey (slowed)
+		kEvLeadPost = 9,    // the player used a fence at a, b, c (its middle): leads in hand are tied to it,
+		                    // or, with none in hand, the ones tied there come off
+		kEvActorAt = 8,     // a host character's stand-in sits in a boat or minecart: formId, a/b/c = where (its feet),
+		                    // d = yaw. Sent every tick while it does; the host keeps the character there.
+		kEvRedstone = 7,    // a redstone source near the player switched: a/b/c = its block, flags = 1 on / 0 off.
+		                    // MiSide's doors within a few blocks of one open.
+		kEvSetting = 18,    // a /miside setting: formId = SettingOption, flags = its value (repeated every 2 s)
+		kEvCommand = 6,     // a chat command about one of the host game's characters: formId = HostCharacter,
+		                    // flags = 0: bring it to the player, 1: spawn a new one
+	};
+
+	// The /miside options (kEvSetting).
+	enum SettingOption : std::uint32_t
+	{
+		kSettingMita = 1,           // 0 realistic (only physics: hair, clothes), 1 minecraft (knocked back)
+		kSettingNpcs = 2,           // the other characters, same values
+		kSettingDoors = 3,          // 0 realistic (hit open), 1 minecraft (right-click opens, left-click breaks)
+		kSettingPhysics = 4,        // 0 on, 1 off: every hit also pushes the host's physics
+		kSettingBlockBreaking = 5,  // 1: Steve may break the host's things (the block breaking experiment)
+	};
+
+	// Who a kEvCommand is about. Matched against the names of the game's character classes.
+	enum HostCharacter : std::uint32_t
+	{
+		kHostMita = 1,
+		kHostKind = 2,
+		kHostCappie = 3,
+		kHostMila = 4,
+		kHostShortHair = 5,
+		kHostSleepy = 6,
+		kHostChibi = 7,
+		kHostCharacterCount
 	};
 
 	enum HitFlags : std::uint32_t
@@ -345,11 +453,30 @@ namespace skycraft::proto
 		                      // section NPCs collide with (sent after its kRenSection; 0 = none)
 		kRenDug = 11,         // RenDug + 512-byte bitset (bit x + 16z + 256y): which blocks of a section
 		                      // were dug out of Skyrim's world (its geometry there is gone); 0 = none
+		kRenShapes = 12,      // RenShapes + RenShape[count]: the collision boxes of a section's blocks that
+		                      // aren't full cubes (doors, fences, slabs), which kRenSolids then leaves out;
+		                      // sent after it (0 = none). MiSide only.
 		kRenRagdoll = 9,      // RenAvatar + RenBatch[] + RenVertex[]: the player's body standing still,
 		                      // relative to the feet and facing +Z, split into its parts (RenBatch
 		                      // flags bits 8-11: RagdollPart). Sent about once a second while alive;
 		                      // Skyrim hangs the parts on its ragdoll when the player dies.
 	};
+
+	struct RenShapes
+	{
+		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
+		std::uint32_t count;       // boxes
+	};
+
+	struct RenShape
+	{
+		std::uint8_t x, y, z;     // block within the section
+		std::uint8_t pad;
+		std::uint8_t min[3];      // the box inside that block, in sixteenths (0-16)
+		std::uint8_t max[3];
+		std::uint8_t pad2[2];
+	};
+	static_assert(sizeof(RenShape) == 12);
 
 	struct RenSolids
 	{

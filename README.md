@@ -1,214 +1,161 @@
-# SkyCraft
+# MiSideCraft
 
-![SkyCraft: a Minecraft player walking through Riverwood with the Minecraft HUD](docs/screenshot.jpg)
+![MiSideCraft: Steve's hand and the Minecraft HUD in MiSide's bedroom, with cobblestone on the rug](docs/screenshot.jpg)
 
-Play Skyrim as a Minecraft player. You move with Minecraft's physics, carry Minecraft's inventory
-and HUD, and place and break blocks in Skyrim's world. You fight Skyrim's NPCs with Minecraft
-weapons, and they fight back.
+Play MiSide as Steve. You walk, jump and fall with Minecraft's physics, carry Minecraft's
+inventory and HUD, and place and break blocks in Mita's world. What the characters say shows up
+in Minecraft's chat.
 
-Neither game is rewritten. Minecraft runs its own game logic, and Skyrim runs its world, NPCs,
-quests and saves. A Skyrim SKSE plugin and a Minecraft Fabric mod talk to each other through
-shared memory. Minecraft runs hidden in the background, and Skyrim draws everything.
+Neither game is rewritten. MiSide runs its world, its characters and its story; Minecraft runs
+its own game logic next to it, hidden. A BepInEx plugin in MiSide and a Fabric mod in Minecraft
+talk to each other through shared memory, and MiSide draws everything.
 
-> **Status: early and experimental.** Expect rough edges, and back up your saves.
-> This is a fan project. It isn't affiliated with Mojang, Microsoft, Bethesda or ZeniMax, and you
+> **Status: early and experimental.** Expect rough edges, and back up your saves
+> (`%USERPROFILE%\AppData\LocalLow\AIHASTO\MiSideFull`).
+> This is a fan project. It isn't affiliated with AIHASTO, IndieArk, Mojang or Microsoft, and you
 > need to own both games.
 
 ## What works
 
-- **Movement:** Minecraft movement on Skyrim's terrain and buildings. That covers walking,
-  sprinting, jumping, crouching, swimming and falling, and Skyrim's collision is fed into
-  Minecraft's own collision.
-- **Blocks:** place and break blocks anywhere in Skyrim. They're drawn inside Skyrim's frame
-  with its sun, shadows, fog and weather. Minecraft lights (torches, lava, glowstone and so on)
-  light up Skyrim.
-- **Digging into Skyrim:** mine Skyrim's ground, rocks, roads and objects like Minecraft blocks.
-  What you dig out drops as the block it's made of (dirt under grass, then stone with ores, then
-  bedrock), and the hole is real for you, NPCs and items. TNT, creepers and other explosions blow
-  craters into Skyrim. Interiors and caves are solid stone behind their walls. What you dig is
-  saved in your Minecraft world. **Skyrim destruction: On/Off** in the top left of the pause menu
-  (O) turns it off (holes already dug stay).
-- **Block entities:** chests, beds, banners, heads, shulker boxes and similar blocks are drawn,
-  and pistons move blocks.
-- **Water and lava:** they flow over Skyrim's terrain, and Skyrim water swims like Minecraft
-  water.
-- **Combat:** hit Skyrim NPCs with any Minecraft weapon, including bows, tridents and TNT.
-  Damage is scaled to NPC level, and NPCs fight back.
-  - NPCs collide with blocks and path around them.
-  - Lava and fire hurt NPCs, and NPCs press pressure plates.
-- **Skyrim progression:**
-  - Your Skyrim skills level up from Minecraft play. Swords, maces and tools train
-    One-Handed; axes and spears train Two-Handed; bows and anything thrown train Archery.
-  - Shields train Block, and hits taken train Light or Heavy Armor depending on what you wear.
-  - Crafting gear trains Smithing, and crouching is Skyrim sneak, which trains Sneak.
-- **Camera and death:** Minecraft's F5 camera modes show your skin and armor in Skyrim. Dying
-  gives Skyrim's death camera with your Minecraft body ragdolling.
-- **Skyrim's own animations:** chairs, crafting stations, beds, pull levers, horses and scripted
-  scenes hand control to Skyrim until they finish.
-- **Multiplayer (Minecraft side only):** friends who also run SkyCraft can join your Minecraft
-  world over the internet (see [Playing with friends](#playing-with-friends)).
+- **Movement:** Minecraft movement on MiSide's floors, furniture and stairs: walking, sprinting,
+  jumping, sneaking, swimming and falling. MiSide's walls and floors are felt out around you and
+  fed into Minecraft's own collision.
+- **Minecraft's picture in MiSide's:** the HUD, your hand and held item, the inventory, chat and
+  every other Minecraft screen, drawn over MiSide's frame.
+- **Blocks:** place and break blocks anywhere. They're drawn inside MiSide's picture in 3D and hide
+  behind MiSide's walls and furniture like they belong there. Torches, lanterns and lava light
+  up the room.
+- **Using MiSide's things:** right-click what MiSide's player would use (doors, switches, items).
+  When you look at one of your own blocks, the right-click is Minecraft's instead.
+- **The characters:** Mita and the others have an invisible stand-in in Minecraft: you bump into
+  them, and when you hit them they're knocked back.
+- **Dialogue in chat:** what the characters say goes into Minecraft's chat, like a player
+  talking (`<Mila Glasses> You've ruined the entire route!`).
+- **Scenes stay MiSide's:** when the story takes the player (a cutscene, a conversation, an
+  animation), MiSide gets control back, and Steve takes over again a moment after.
+- **F6** switches between Steve and MiSide's own player at any time.
+- **A Minecraft world of your own:** a Survival world is made on your PC, with a starter kit, a
+  builder's kit, a home kit for Mita's world (a pink bed, cake, flowers, a jukebox) and a guide
+  book.
+- **Pause menu:** Escape in Minecraft mode opens a pause menu with your advancements, Minecraft's
+  options and MiSide's own menu. MiSide stands still while it is open.
+- **Commands:** `/mita` (or `/tp mita`) brings that character to you, `/summon mita` makes another
+  one of her; the same for `kind`, `cappie`, `mila`, `short_hair`, `sleepy` and `chibi`, when
+  she is somewhere in the current chapter. Plus `/repairworld`, `/experiment` and Minecraft's own.
 
 ## Requirements
 
-**Skyrim**
-
-| | |
-|---|---|
-| Skyrim Special Edition, **Anniversary Edition runtime** (1.6.x / 1.7.x) | Developed and tested on **1.7.104**. Not SE 1.5.97, not VR. |
-| [SKSE64](https://skse.silverlock.org/) | For your game version |
-| [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444) | The "All in one (Anniversary Edition)" file |
-
-> **Heavily recommended: [Alternate Start - Live Another Life](https://www.nexusmods.com/skyrimspecialedition/mods/272).**
-> Skyrim's opening (the cart ride and Helgen) is heavily scripted and may not work with SkyCraft,
-> so you can get stuck. Alternate Start skips it and lets you choose where your new character
-> begins. Otherwise, play from a save made after Helgen.
-
-**Minecraft**
-
-You only need **a Microsoft account that owns Minecraft: Java Edition**. SkyCraft comes with
-everything else: a portable [Prism Launcher](https://prismlauncher.org/) set up with Minecraft 26.3,
-[Fabric](https://fabricmc.net/), [Fabric API](https://modrinth.com/mod/fabric-api) and the SkyCraft
-Minecraft mod. Prism downloads Minecraft and Java itself.
-
-Minecraft runs hidden next to Skyrim. Budget about 3 GB of extra RAM, about 1.5 GB of disk for
-Minecraft's own files, and a GPU that runs Minecraft 26.3.
+- **MiSide** on Steam (Windows).
+- **Minecraft: Java Edition**, a Microsoft account that owns it. MiSideCraft brings its own
+  launcher (Prism Launcher), which downloads Minecraft and Java for you.
+- About 4 GB of RAM to spare for Minecraft next to MiSide.
 
 ## Installing
 
-1. **Install `SkyCraft-<version>.zip`** with Mod Organizer 2 or Vortex, like any SKSE plugin.
-2. **Start Skyrim through SKSE.** The first time, SkyCraft unpacks its Minecraft to
-   `%LOCALAPPDATA%\SkyCraft` and a small **Prism Launcher** window asks you to sign in with your
-   Microsoft account. Alt-Tab to it, sign in, then go back to Skyrim. Prism downloads Minecraft,
-   Fabric and Java (a few minutes, first time only), and Skyrim's corner messages tell you when
-   Minecraft is ready.
-3. **After that it's automatic.** Minecraft starts with Skyrim with no window and no sound, opens
-   its SkyCraft world by itself (a new Survival world, created on your PC), and quits when Skyrim
-   closes.
+1. **Download `MiSideCraft-<version>.zip`** from the releases.
+2. **Open MiSide's folder:** in Steam, right-click MiSide, choose **Manage**, then
+   **Browse local files**. That's `Steam\steamapps\common\MiSide` (where `MiSideFull.exe` is).
+3. **Unpack the zip into that folder**, so that `BepInEx`, `winhttp.dll` and
+   `doorstop_config.ini` sit next to `MiSideFull.exe`. Allow it to replace files if it asks.
+4. **Start MiSide from Steam.** The first start takes a minute longer: BepInEx prepares itself
+   once.
+5. **Sign in to Minecraft, once.** MiSideCraft unpacks its Minecraft to
+   `%LOCALAPPDATA%\MiSideCraft`, and a small **Prism Launcher** window asks for your Microsoft
+   account. Alt-Tab to it, sign in, then go back to MiSide. Prism downloads Minecraft, Fabric and
+   Java (a few minutes, first time only). The corner of MiSide's screen says what Minecraft is
+   doing.
+6. **Load a save and play.** As soon as Minecraft is in its world, you are Steve. Press **F6** to
+   switch to MiSide's own player and back.
 
-Updating: install the new SkyCraft zip over the old one. The next start updates the Minecraft side
-too and keeps your sign-in and your world.
+After that it's automatic: Minecraft starts with MiSide, hidden, opens its world by itself, and
+closes with MiSide.
 
-Uninstalling: remove the mod, then delete `%LOCALAPPDATA%\SkyCraft`. That folder holds Prism, your
-Microsoft sign-in (Prism's), Minecraft's files and your SkyCraft world.
+**Updating:** unpack the new zip over the old one. The next start updates the Minecraft side too
+and keeps your sign-in and your world.
+
+**Uninstalling:** delete `BepInEx`, `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`,
+`changelog.txt` and `dotnet` from MiSide's folder (or let Steam verify the game's files), then
+delete `%LOCALAPPDATA%\MiSideCraft`. That folder holds Prism, your Microsoft sign-in (Prism's),
+Minecraft's files and your MiSideCraft world.
 
 ### Using your own launcher
 
-`Data/SKSE/Plugins/SkyCraft.ini` can point SkyCraft at your own Prism, MultiMC or `.bat` file instead:
+`BepInEx\plugins\MiSideCraft\MiSideCraft.ini` chooses which Minecraft MiSide starts:
 
 ```ini
-[Minecraft]
-bStartWithSkyrim = 1              ; 0: start Minecraft yourself, any way you like
-sLauncher =                       ; empty: the Minecraft that comes with SkyCraft
-sArguments = --launch SkyCraft    ; what your launcher needs to start the SkyCraft instance
+Minecraft = prism   ; the Prism Launcher that comes with MiSideCraft
+Minecraft = none    ; start Minecraft yourself; MiSide waits for it
 ```
 
-Your instance needs Minecraft 26.3, Fabric Loader 0.19.5 or newer, Fabric API, Java 25 and
-`skycraft-fabric-<version>.jar` (from the release), plus `-Dskycraft.startHidden=true` in its
-JVM arguments if it should stay hidden from the start. SkyCraft never starts a second Minecraft if
-one with the mod is already running. It starts Minecraft through Windows' shell, so under Mod
-Organizer Minecraft stays outside MO2's virtual file system and doesn't keep MO2 locked.
-
-## Playing with friends
-
-Everyone needs their own Skyrim with SkyCraft. Only the Minecraft world is shared: blocks, items,
-mobs and each other. Up to 100 players. Each player keeps their own Skyrim world, NPCs and quests.
-
-1. **Host:** press **O** (Minecraft's menu), choose **Open to LAN**, then **Start LAN World**.
-   SkyCraft's bundled [e4mc](https://modrinth.com/mod/e4mc) puts a link like `abc-def.e4mc.link`
-   in chat. Click it to copy it, then send it to your friends.
-2. **Friends:** press **T** and type `/join abc-def.e4mc.link`. Your Minecraft leaves its own
-   world and joins the host's.
-3. **`/leave`** goes back to your own world. If the host closes their world, you're put back in
-   yours automatically.
-
-**With Discord:** your Discord status shows SkyCraft while you play. Once you've opened your world
-to LAN it has a **Join** button (and you can invite friends from a Discord chat). A friend with
-Skyrim and SkyCraft already running clicks it and joins you, no link needed.
+With `none`, your instance needs Minecraft 26.3, Fabric Loader 0.19.5 or newer, Fabric API,
+Java 25 and `misidecraft-fabric-<version>.jar` (from the release), plus
+`-Dskycraft.passthrough=true` in its JVM arguments (and `-Dskycraft.startHidden=true` to keep its
+window hidden). MiSideCraft never starts a second Minecraft if one with the mod is running.
 
 ## Controls
 
-Minecraft has priority. These keys still go to Skyrim:
+Minecraft has priority while you are Steve:
 
 | Key | Does |
 |---|---|
-| **G** | Skyrim activate: doors, NPCs (talk), containers, levers, furniture |
-| **Esc** | Skyrim menu (or closes an open Minecraft screen) |
-| **J** / **M** | Skyrim journal / map |
-| **H** | Skyrim wait |
-| **F9** | Skyrim quickload (save from the Esc menu) |
-| **~** | Skyrim console |
-| **O** | Minecraft pause / options menu |
+| **Right mouse** | Use what MiSide's player looks at (a door, a switch, an item); otherwise Minecraft's use/place |
+| **Left mouse** | Minecraft's attack and break, also on the characters |
+| **Esc** | The pause menu (or closes an open Minecraft screen) |
+| **F6** | Switch between Steve and MiSide's own player |
 
-Every other key is Minecraft's: **E** inventory, **F5** camera, **T** chat, **/** commands,
-**Shift** crouch/sneak, and so on.
+Every other key is Minecraft's: **WASD**, **Space** jump, **Shift** sneak, **Ctrl** sprint,
+**E** inventory, **T** chat, **/** commands, **1-9** hotbar, and so on.
 
 ## Known limitations
 
-- If something goes wrong, `Documents\My Games\Skyrim Special Edition\SKSE\SkyCraft.log` says what.
-  For bug reports, set `bDiagnostics = 1` in `SkyCraft.ini` for detailed logs.
-- **Stuck on "SkyCraft: starting Minecraft..."?** After a minute SkyCraft says which of these it is:
-  - Prism Launcher is still busy. Alt-Tab to it: it may be downloading, or need you to sign in,
-    or show an error.
-  - Minecraft closed. Its log is
-    `%LOCALAPPDATA%\SkyCraft\Prism\instances\SkyCraft\.minecraft\logs\latest.log`.
-  - Minecraft is running but not responding. Please report it, with `SkyCraft.log` and that
-    `latest.log`.
-
-  You need to own Minecraft: Java Edition.
-
-- Skyrim's opening (cart ride and Helgen) may leave you stuck. Use
-  [Alternate Start](https://www.nexusmods.com/skyrimspecialedition/mods/272) or a save made after Helgen.
-- Skyrim's inventory, magic, shouts and perks can't be opened while Minecraft drives the player.
-- Minecraft hits only reach NPCs, not Skyrim objects such as the web around Arvel in Bleak Falls
-  Barrow. There's no in-game switch back to plain Skyrim yet. Closing Minecraft hands control
-  back to Skyrim; Minecraft keeps what it last autosaved, every few minutes. Deal with the object,
-  then restart Skyrim to bring Minecraft back.
-- Sign text isn't drawn yet.
-- All Skyrim interiors share one Minecraft world, so blocks placed in one interior can appear in
-  another at the same coordinates.
-- Multiplayer syncs only the Minecraft world. Each player has their own Skyrim, and guests
-  can't hit their own Skyrim NPCs yet.
-- Mods that also take over the camera (Improved Camera SE, SmoothCam, True Directional Movement)
-  will conflict.
+- **F5** (third person) isn't drawn yet: the camera stays at Steve's eyes.
+- MiSide's minigames and scenes with their own controls are played as MiSide's player: the game
+  takes control for them, and Steve comes back afterwards.
+- Characters are knocked back by hits, but they don't fight back and can't be hurt. Minecraft's
+  tricks on characters (leads, buckets, pumpkins) aren't hooked
+  up on MiSide's side yet.
+- Blocks are kept per Minecraft world, not per MiSide save or chapter, so blocks placed in one
+  room can show up in another room at the same spot.
+- What the characters say reaches the chat in English (and other languages written in Latin
+  letters); other languages stay out of the chat.
+- If something goes wrong, `BepInEx\LogOutput.log` (lines from MiSideCraft) and
+  `BepInEx\plugins\MiSideCraft\MiSideCraft.log` say what. Minecraft's own log is
+  `%LOCALAPPDATA%\MiSideCraft\Prism\instances\MiSideCraft\.minecraft\logs\latest.log`.
 
 ## Building from source
 
-You need Visual Studio 2026 (C++), CMake 3.25+, Git, and JDK 25.
+You need Visual Studio 2026 (C++), CMake 3.25+, the .NET 8 SDK, JDK 25, and MiSide with BepInEx
+run once (the plugin builds against the game's `BepInEx\interop` folder).
 
 ```bat
-git clone --recursive <this repo> skycraft
-cd skycraft
-git clone https://github.com/microsoft/vcpkg .tools\vcpkg
-.tools\vcpkg\bootstrap-vcpkg.bat
+cmake -S ms\native -B ms\native\build -G "Visual Studio 18 2026" -A x64
+cmake --build ms\native\build --config Release
 
-cd skse
-cmake --preset default
-cmake --build --preset release
+dotnet build ms\plugin -c Release -p:Install=true
 
-cd ..\fabric
+cd fabric
 gradlew build
-
 cd ..
+
 powershell -ExecutionPolicy Bypass -File tools\package.ps1 -NoBuild
 ```
 
-`tools\package.ps1` builds both halves (drop `-NoBuild`) and writes the release files to `dist\`.
-
-For development:
-
-- `fabric\gradlew runClient` starts a dev Minecraft that stays running when Skyrim closes.
-- With `SKYCRAFT_DEPLOY_DIR` (preset default: the MO2 mod folder `mods\SkyCraft`, if it exists),
-  each plugin build is copied straight into Mod Organizer.
-- `docs\DESIGN.md` explains how the two halves fit together, and `protocol\skycraft_protocol.h`
-  is the shared-memory layout both sides follow.
+`-p:Install=true` copies the plugin and its native half into MiSide's `BepInEx\plugins\MiSideCraft`.
+With `Minecraft = source` in that folder's `MiSideCraft.ini`, MiSide starts this repo's Fabric
+project (`gradlew runClient`) instead of the bundled Minecraft. `tools\package.ps1` builds
+everything (drop `-NoBuild`) and writes the release files to `dist\`.
 
 | Folder | |
 |---|---|
-| `skse/` | The Skyrim SKSE plugin (C++, [CommonLibSSE-NG](https://github.com/alandtse/CommonLibVR/tree/ng)) |
+| `ms/plugin/` | The MiSide half: a BepInEx 6 plugin (C#) for the player, camera, collision, characters, dialogue |
+| `ms/native/` | Its native half (C++): the shared memory, Minecraft's picture over MiSide's frame, blocks in 3D, keyboard and mouse, starting Minecraft |
 | `fabric/` | The Minecraft Fabric mod (Java) |
 | `protocol/` | The shared-memory protocol between them |
-| `tools/` | Packaging, test stand-ins (`fake_skyrim.py`, `fake_guest.py`) and diagnostics |
+| `tools/` | Packaging and diagnostics |
 
-## License
+## Credits and license
 
-[MIT](LICENSE)
+MiSideCraft is made by Mielesgames, on top of [SkyCraft](https://github.com/chasmlol/SkyCraft) by
+chasmlol (Skyrim as Steve), whose shared-memory link, Minecraft mod and block renderer it
+builds on. [MIT](LICENSE). See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for what a
+release contains.

@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The MiSide half of the mod: a BepInEx 6 (IL2CPP) plugin. Builds against the
+       game's BepInEx folder, so BepInEx has to have run once (it writes interop/). -->
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>MiSideCraft</AssemblyName>
+    <RootNamespace>MiSideCraft</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <MiSideDir Condition="'$(MiSideDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\MiSide</MiSideDir>
+    <BepInExDir>$(MiSideDir)\BepInEx</BepInExDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="$(BepInExDir)\core\BepInEx.Core.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\core\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\core\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\core\Il2CppInterop.Common.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\core\0Harmony.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\interop\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\interop\Assembly-CSharp.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\interop\MagicaCloth.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\interop\UnityEngine.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\interop\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\interop\UnityEngine.PhysicsModule.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\interop\UnityEngine.InputLegacyModule.dll" Private="false" />
+    <Reference Include="$(BepInExDir)\interop\UnityEngine.AnimationModule.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- Into the game: the plugin and the native half next to each other. -->
+  <Target Name="InstallIntoGame" AfterTargets="Build" Condition="'$(Install)' == 'true'">
+    <MakeDir Directories="$(BepInExDir)\plugins\MiSideCraft" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(BepInExDir)\plugins\MiSideCraft" />
+    <Copy SourceFiles="..\native\build\Release\MiSideCraftNative.dll" DestinationFolder="$(BepInExDir)\plugins\MiSideCraft" />
+  </Target>
+
+</Project>

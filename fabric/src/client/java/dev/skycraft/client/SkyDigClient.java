@@ -63,6 +63,14 @@ public final class SkyDigClient {
 	 * as mining the block it's made of would take. Returns true if it's being mined.
 	 */
 	public static boolean attack(Minecraft minecraft) {
+		// MiSide: mining its floors and walls is an experiment, off unless enabled.
+		if (SkyDig.PASSTHROUGH && !dev.skycraft.SkyCraft.experiments(minecraft.getSingleplayerServer())) {
+			return false;
+		}
+		if (SkyDig.PASSTHROUGH && !(minecraft.hitResult instanceof SkyClip.SkyrimHitResult) && minecraft.level != null && minecraft.player != null
+			&& minecraft.gameMode != null && (minecraft.hitResult == null || minecraft.hitResult.getType() == net.minecraft.world.phys.HitResult.Type.MISS)) {
+			return attackHoleWall(minecraft);
+		}
 		if (!(minecraft.hitResult instanceof SkyClip.SkyrimHitResult result) || minecraft.level == null || minecraft.player == null || minecraft.gameMode == null) {
 			return false;
 		}
@@ -71,13 +79,22 @@ public final class SkyDigClient {
 			return false; // (a guest asks anyway: the host's setting decides)
 		}
 		SkyRay.Hit hit = result.hit;
-		if (hit.tri() == null || !hit.tri().diggable) {
+		boolean passthrough = SkyDig.PASSTHROUGH;
+		if (passthrough) {
+			// MiSide: any of its surfaces can be mined, but only with a digging tool (a
+			// sword or a fist is for hitting what stands there, not the building).
+			var tool = minecraft.player.getMainHandItem();
+			if (hit.tri() == null || !(tool.is(net.minecraft.tags.ItemTags.PICKAXES) || tool.is(net.minecraft.tags.ItemTags.SHOVELS))) {
+				return false;
+			}
+		} else if (hit.tri() == null || !hit.tri().diggable) {
 			return false; // a building, or something else that stays
 		}
 		int[] cell = SkyRay.surfaceCell(hit);
 		BlockPos pos = new BlockPos(cell[0], cell[1], cell[2]);
 		BlockState here = minecraft.level.getBlockState(pos);
-		if (!here.isAir() && !here.canBeReplaced()) {
+		// (MiSide: the barriers a dug hole leaves under the floor beside it can be dug too.)
+		if (!here.isAir() && !here.canBeReplaced() && !(passthrough && here.is(net.minecraft.world.level.block.Blocks.BARRIER))) {
 			return false;
 		}
 		if (SkyDig.isDug(minecraft.level, world(), pos)) {
@@ -94,7 +111,8 @@ public final class SkyDigClient {
 		}
 		miningTick = ticks;
 		int material = hit.tri().material == 0 ? DIG_STONE : hit.tri().material;
-		BlockState state = SkyDig.materialState(material);
+		// MiSide's building is mined as hard as deepslate: a few seconds' work a cell.
+		BlockState state = passthrough ? net.minecraft.world.level.block.Blocks.DEEPSLATE.defaultBlockState() : SkyDig.materialState(material);
 		progress += minecraft.player.getAbilities().instabuild ? 1.0F : state.getDestroyProgress(minecraft.player, minecraft.level, pos);
 		if (hits++ % 4 == 0) {
 			var sound = state.getSoundType();
@@ -106,7 +124,58 @@ public final class SkyDigClient {
 		}
 		if (progress >= 1.0F) {
 			ClientPlayNetworking.send(new SkyNet.DigOpen(world(), pos, material));
-			REVEAL.put(pos.asLong(), REVEAL_TRIES); // what's around it: blocks, or walls
+			if (!passthrough) {
+				REVEAL.put(pos.asLong(), REVEAL_TRIES); // what's around it: blocks, or walls
+			}
+			mining = null;
+			progress = 0.0F;
+		}
+		return true;
+	}
+
+	/**
+	 * MiSide: the sides of a hole under the game's floor are only collision (SkyDig.wallShape),
+	 * nothing a crosshair can point at. Looking at nothing, the first such cell along the look within
+	 * reach is mined like the game's surfaces are (with a pickaxe or shovel, as hard as deepslate).
+	 */
+	private static boolean attackHoleWall(Minecraft minecraft) {
+		var player = minecraft.player;
+		var tool = player.getMainHandItem();
+		if (!(tool.is(net.minecraft.tags.ItemTags.PICKAXES) || tool.is(net.minecraft.tags.ItemTags.SHOVELS))) {
+			return false;
+		}
+		net.minecraft.world.phys.Vec3 eye = player.getEyePosition();
+		net.minecraft.world.phys.Vec3 look = player.getLookAngle();
+		BlockPos pos = null;
+		for (double t = 0.2; t <= player.blockInteractionRange(); t += 0.1) {
+			BlockPos cell = BlockPos.containing(eye.add(look.scale(t)));
+			if (minecraft.level.getBlockState(cell).isAir() && SkyDig.wallShape(minecraft.level, cell) != null && !SkyDig.isDug(minecraft.level, world(), cell)) {
+				pos = cell;
+				break;
+			}
+		}
+		if (pos == null) {
+			return false;
+		}
+		if (pos.equals(mining) && miningTick == ticks) {
+			return true;
+		}
+		if (!pos.equals(mining) || ticks - miningTick > 2) {
+			mining = pos;
+			progress = 0.0F;
+			hits = 0;
+		}
+		miningTick = ticks;
+		BlockState state = net.minecraft.world.level.block.Blocks.DEEPSLATE.defaultBlockState();
+		progress += player.getAbilities().instabuild ? 1.0F : state.getDestroyProgress(player, minecraft.level, pos);
+		if (hits++ % 4 == 0) {
+			var sound = state.getSoundType();
+			minecraft.getSoundManager().play(new SimpleSoundInstance(
+				sound.getHitSound(), SoundSource.BLOCKS, (sound.getVolume() + 1.0F) / 8.0F, sound.getPitch() * 0.5F, SoundInstance.createUnseededRandom(), pos
+			));
+		}
+		if (progress >= 1.0F) {
+			ClientPlayNetworking.send(new SkyNet.DigOpen(world(), pos, DIG_STONE));
 			mining = null;
 			progress = 0.0F;
 		}

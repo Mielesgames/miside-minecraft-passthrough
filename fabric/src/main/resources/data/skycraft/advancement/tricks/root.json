@@ -1,0 +1,17 @@
+{
+  "criteria": {
+    "linked": {
+      "trigger": "minecraft:tick"
+    }
+  },
+  "display": {
+    "title": "MiSideCraft",
+    "description": "Steve in Mita's world",
+    "icon": {
+      "id": "minecraft:clock"
+    },
+    "background": "minecraft:block/pink_concrete",
+    "show_toast": false,
+    "announce_to_chat": false
+  }
+}

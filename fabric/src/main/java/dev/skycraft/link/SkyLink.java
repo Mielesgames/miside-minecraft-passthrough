@@ -68,7 +68,7 @@ public final class SkyLink {
 			MemorySegment name = arena.allocateFrom(MAPPING_NAME + "_minecraft", StandardCharsets.UTF_16LE);
 			runningMutex = (MemorySegment) CREATE_MUTEX.invokeExact(MemorySegment.NULL, 0, name);
 		} catch (Throwable t) {
-			SkyCraft.LOG.warn("SkyCraft: couldn't create the running-Minecraft mutex", t);
+			SkyCraft.LOG.warn("MiSideCraft: couldn't create the running-Minecraft mutex", t);
 		}
 	}
 
@@ -115,7 +115,7 @@ public final class SkyLink {
 				skyrimPid = pid;
 				overlayBack = 1;
 				generation++;
-				SkyCraft.LOG.info("SkyCraft: Skyrim instance changed (pid {})", pid);
+				SkyCraft.LOG.info("MiSideCraft: the game instance changed (pid {})", pid);
 			}
 			return;
 		}
@@ -133,21 +133,21 @@ public final class SkyLink {
 				int error = (int) LAST_ERROR.get(OPEN_STATE, 0L);
 				if (error != lastOpenError) {
 					lastOpenError = error;
-					SkyCraft.LOG.info("SkyCraft: can't open Skyrim's shared memory yet (Windows error {}{})", error,
+					SkyCraft.LOG.info("MiSideCraft: can't open the game's shared memory yet (Windows error {}{})", error,
 						error == 2 ? ": Skyrim hasn't created it yet" : error == 5 ? ": access denied; is Skyrim running as administrator?" : "");
 				}
 				return;
 			}
 			MemorySegment view = (MemorySegment) MAP_VIEW_OF_FILE.invokeExact(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0L);
 			if (view.address() == 0) {
-				SkyCraft.LOG.error("SkyCraft: MapViewOfFile failed");
+				SkyCraft.LOG.error("MiSideCraft: MapViewOfFile failed");
 				return;
 			}
 			MemorySegment seg = view.reinterpret(MAPPING_BYTES);
 			int magic = seg.get(JAVA_INT, OFF_HEADER + H_MAGIC);
 			int version = seg.get(JAVA_INT, OFF_HEADER + H_VERSION);
 			if (magic != MAGIC || version != VERSION) {
-				SkyCraft.LOG.error("SkyCraft: protocol mismatch (magic {} version {}); expected version {}", Integer.toHexString(magic), version, VERSION);
+				SkyCraft.LOG.error("MiSideCraft: protocol mismatch (magic {} version {}); expected version {}", Integer.toHexString(magic), version, VERSION);
 				return;
 			}
 			seg.set(JAVA_INT, OFF_HEADER + H_MC_PID, (int) GET_CURRENT_PROCESS_ID.invokeExact());
@@ -155,9 +155,9 @@ public final class SkyLink {
 			skyrimPid = seg.get(JAVA_INT, OFF_HEADER + H_SKYRIM_PID);
 			generation++;
 			shm = seg;
-			SkyCraft.LOG.info("SkyCraft: linked to Skyrim (pid {})", seg.get(JAVA_INT, OFF_HEADER + H_SKYRIM_PID));
+			SkyCraft.LOG.info("MiSideCraft: linked to the game (pid {})", seg.get(JAVA_INT, OFF_HEADER + H_SKYRIM_PID));
 		} catch (Throwable t) {
-			SkyCraft.LOG.error("SkyCraft: failed to open shared memory", t);
+			SkyCraft.LOG.error("MiSideCraft: failed to open shared memory", t);
 		}
 	}
 
@@ -214,6 +214,11 @@ public final class SkyLink {
 		public boolean loading() {
 			return (this.flags & SKY_LOADING) != 0;
 		}
+
+		/** The host game moves its player itself (its own physics); ours only follows. */
+		public boolean hostDrives() {
+			return (this.flags & SKY_HOST_DRIVES) != 0;
+		}
 	}
 
 	/** Seqlock read of SkyState into {@code out}. Returns false if the link is down. */
@@ -253,6 +258,12 @@ public final class SkyLink {
 			}
 		}
 		return null;
+	}
+
+	/** The host's current world (SkyState.worldId), or 0 without a link. */
+	public static int readSkyStateWorld() {
+		SkyState state = new SkyState();
+		return readSkyState(state) ? state.worldId : 0;
 	}
 
 	public static boolean readSkyState(SkyState out) {
@@ -322,6 +333,8 @@ public final class SkyLink {
 		public float bobO, bob;
 		public float tickMs = 50.0F;
 		public int cameraMode;
+		/** MiSide: the broken-object paper in the main hand (0: none). */
+		public int heldToken;
 		public float cameraDistance;
 	}
 
@@ -342,6 +355,7 @@ public final class SkyLink {
 		s.set(JAVA_FLOAT, b + MS_PITCH, st.pitch);
 		s.set(JAVA_FLOAT, b + MS_EYE_HEIGHT, st.eyeHeight);
 		s.set(JAVA_FLOAT, b + MS_SENSITIVITY, st.sensitivity);
+		s.set(JAVA_INT, b + MS_HELD_TOKEN, st.heldToken);
 		s.set(JAVA_INT, b + MS_TELEPORT_ACK, st.teleportAck);
 		s.set(JAVA_INT, b + MS_GUI_SCALE, st.guiScale);
 		s.set(JAVA_LONG, b + MS_FRAME_COUNTER, st.frameCounter);
@@ -562,7 +576,7 @@ public final class SkyLink {
 		int payload = header.remaining() + (body != null ? body.remaining() : 0);
 		long msgBytes = (8 + payload + 7) & ~7L;
 		if (msgBytes > RR_DATA_BYTES / 2) {
-			SkyCraft.LOG.warn("SkyCraft: render message too large ({} bytes)", msgBytes);
+			SkyCraft.LOG.warn("MiSideCraft: render message too large ({} bytes)", msgBytes);
 			return false;
 		}
 		long base = OFF_RENDER_RING;

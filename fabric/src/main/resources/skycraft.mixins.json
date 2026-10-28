@@ -4,6 +4,7 @@
   "compatibilityLevel": "JAVA_25",
   "mixins": [
     "AbstractArrowMixin",
+    "PlayerCrawlMixin",
     "BlockCollisionsMixin",
     "BlockStateBaseMixin",
     "EntityFluidInteractionMixin",
@@ -11,6 +12,8 @@
     "EntitySwimMixin",
     "FallingBlockMixin",
     "FlowingFluidMixin",
+    "IronGolemMixin",
+    "LivingEntityAccessor",
     "ItemMixin",
     "MinecraftServerFlightMixin",
     "PlayerEdgeMixin",
@@ -19,7 +22,8 @@
     "ProjectileUtilMixin",
     "ServerExplosionMixin",
     "ServerPlayerMixin",
-    "SmithingMixin"
+    "SmithingMixin",
+    "WalkNodeEvaluatorMixin"
   ],
   "injectors": { "defaultRequire": 1 }
 }
