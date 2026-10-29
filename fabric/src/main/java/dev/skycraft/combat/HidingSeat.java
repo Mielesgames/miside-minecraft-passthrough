@@ -33,6 +33,13 @@ public final class HidingSeat {
 		}
 		seat = fresh;
 		boolean seated = player.startRiding(fresh, true, false);
+		if (seated) {
+			// A rider sits on top of an armor stand, almost two blocks up: on a sofa that was the roof
+			// (29 Oct). The stand goes down so that the player's feet hang half a block under the seat.
+			double off = player.getY() - (y - 0.5);
+			fresh.setPos(x, y - off, z);
+			fresh.positionRider(player);
+		}
 		SkyCraft.LOG.info("MiSideCraft: hiding seat at {}, {}, {}: {}", x, y, z, seated ? "the player sits" : "the player could not sit");
 	}
 }

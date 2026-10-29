@@ -122,6 +122,31 @@ public final class SkyCombat {
 		}
 	}
 
+	/** Below this nothing of MiSide's is: what falls this far is out of bounds, and goes. */
+	private static final double OUT_OF_BOUNDS_Y = -32.0;
+
+	/**
+	 * Mobs and items that fell out of MiSide's rooms (no floor out there) kept falling forever and
+	 * made the world laggy (29 Oct). Gone once they are far below every floor; players and the
+	 * host's characters' stand-ins stay (the host says where those are).
+	 */
+	private static void dropOutOfBounds(ServerLevel level) {
+		if (!dev.skycraft.world.SkyDig.PASSTHROUGH || level.getGameTime() % 20 != 0) {
+			return;
+		}
+		List<net.minecraft.world.entity.Entity> gone = new java.util.ArrayList<>();
+		for (var entity : level.getAllEntities()) {
+			if (entity.getY() < OUT_OF_BOUNDS_Y && !(entity instanceof net.minecraft.world.entity.player.Player)
+				&& !(entity instanceof SkyrimActorEntity)) {
+				gone.add(entity);
+			}
+		}
+		for (var entity : gone) {
+			SkyCraft.LOG.info("MiSideCraft: {} fell out of the world at y {}, removed", entity.getName().getString(), (int) entity.getY());
+			entity.discard();
+		}
+	}
+
 	private static void serverTick(MinecraftServer server) {
 		List<ServerPlayer> players = server.getPlayerList().getPlayers();
 		if (!SkyLink.active() || players.isEmpty()) {
@@ -139,6 +164,7 @@ public final class SkyCombat {
 		survivalOnly(level);
 		anvilsFall(level);
 		holdInUnknown(level);
+		dropOutOfBounds(level);
 		leaveFarVehicles(players);
 		// Hits land during the tick (melee, sweeps, arrows, fire); send one combined hit per actor.
 		for (SkyrimActorEntity proxy : PROXIES.values()) {
@@ -416,7 +442,7 @@ public final class SkyCombat {
 			}
 		}
 		// Sitting on the chicken's back.
-		SkyLink.pushEvent(Proto.EV_ACTOR_AT, id, (float) chicken.getX(), (float) chicken.getY() + 0.4F, (float) chicken.getZ(), chicken.getYRot(), 0);
+		SkyLink.pushEvent(Proto.EV_ACTOR_AT, id, (float) chicken.getX(), (float) chicken.getY() + 0.4F, (float) chicken.getZ(), chicken.getYRot(), Proto.ACTOR_AT_SITS);
 		return true;
 	}
 
@@ -741,7 +767,7 @@ public final class SkyCombat {
 			proxy.setSize(a.width(), a.height());
 			if (proxy.isPassenger()) {
 				// Stuck in a boat or minecart: now it is Minecraft that says where the character is.
-				SkyLink.pushEvent(Proto.EV_ACTOR_AT, a.formId(), (float) proxy.getX(), (float) proxy.getY(), (float) proxy.getZ(), proxy.getYRot(), 0);
+				SkyLink.pushEvent(Proto.EV_ACTOR_AT, a.formId(), (float) proxy.getX(), (float) proxy.getY(), (float) proxy.getZ(), proxy.getYRot(), Proto.ACTOR_AT_SITS);
 				continue;
 			}
 			proxy.setPos(a.x(), a.y(), a.z());

@@ -302,6 +302,31 @@ internal static class Hits
     private static BaseCloth[] cloths = Array.Empty<BaseCloth>();
     private static float clothsFound = -10f;
 
+    // The root bones of all hair and clothes (MagicaCloth moves what hangs from them).
+    public static List<Transform> ClothRoots()
+    {
+        var roots = new List<Transform>();
+        foreach (var cloth in Cloths())
+        {
+            if (cloth == null)
+            {
+                continue;
+            }
+
+            var bone = cloth.TryCast<MagicaBoneCloth>();
+            var target = bone != null ? bone.ClothTarget : cloth.TryCast<MagicaBoneSpring>()?.ClothTarget;
+            for (int i = 0; target != null && i < target.RootCount; i++)
+            {
+                if (target.GetRoot(i) != null)
+                {
+                    roots.Add(target.GetRoot(i));
+                }
+            }
+        }
+
+        return roots;
+    }
+
     private static BaseCloth[] Cloths()
     {
         if (Time.realtimeSinceStartup - clothsFound > 2f)
@@ -665,9 +690,16 @@ internal static class Seats
 
     private static bool IsSeat(Transform t)
     {
+        // Doors aren't (one between bedroom and toilet is called so).
+        if (t.GetComponentInParent<ObjectDoor>() != null)
+        {
+            return false;
+        }
+
         for (var at = t; at != null; at = at.parent)
         {
-            string name = at.name.ToLowerInvariant();
+            // A room's name ("Bedroom") says where a thing is, not what it is.
+            string name = at.name.ToLowerInvariant().Replace("bedroom", "");
             foreach (var word in Furniture)
             {
                 if (name.Contains(word))

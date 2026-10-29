@@ -27,6 +27,8 @@ internal static class Actors
     private const uint EvHitActor = 1;
     private const uint EvActorPush = 10;
     private const uint EvLeash = 12;
+    private const uint EvActorAt = 8;
+    private const uint ActorAtSits = 8;
     // Characters on a lead: where its other end is, and when Minecraft last said so.
     private static readonly Dictionary<uint, (Vector3 end, float at)> leashes = new();
     private const float LeashLength = 4f;
@@ -85,7 +87,142 @@ internal static class Actors
         }
 
         HoldOnLeashes(now);
+        Dismount(now);
         Write(player);
+    }
+
+    // ---- riding (a jockey's chicken, a boat): sitting, carried along
+
+    private sealed class Rider
+    {
+        public Character who;
+        public float at;
+        public UnityEngine.Playables.PlayableGraph graph;
+        public bool sitting;
+        public bool agentWas;
+    }
+
+    private static readonly Dictionary<uint, Rider> riders = new();
+    private static AnimationClip sitClip;
+    private static bool sitLooked;
+
+    private static void Ride(Character c, Vector3 seat, float yaw, bool sits)
+    {
+        uint id = (uint)c.root.GetInstanceID();
+        if (!riders.TryGetValue(id, out var rider))
+        {
+            rider = new Rider { who = c };
+            riders[id] = rider;
+            // Measured once: measured anew each tick from where her model was last drawn, her object
+            // ran away from the chicken (her model held where it was by her own walking).
+            var agent = c.mita != null ? c.mita.nma : null;
+            rider.agentWas = agent != null && agent.enabled;
+            if (agent != null)
+            {
+                agent.enabled = false;
+            }
+
+            if (sits)
+            {
+                Sit(rider);
+            }
+
+            Plugin.Say($"ride: {c.name} rides along{(rider.sitting ? $", sitting ({sitClip.name})" : "")}");
+        }
+
+        rider.at = Time.realtimeSinceStartup;
+        // The one the player is (spectating her) goes where the player walks her, not on the chicken.
+        if (c.mita != null && Possession.IsPlayed(c.mita))
+        {
+            return;
+        }
+
+        // Her own script turns her walking back on: off again every tick.
+        var walker = c.mita != null ? c.mita.nma : null;
+        if (walker != null && walker.enabled)
+        {
+            walker.enabled = false;
+        }
+
+        Place(c.mita, c.root, seat, Quaternion.Euler(0f, yaw, 0f));
+    }
+
+    // A sitting animation of the game's, played over hers while she rides.
+    private static void Sit(Rider rider)
+    {
+        var animator = rider.who.mita != null ? rider.who.mita.animMita : rider.who.root.GetComponentInChildren<Animator>();
+        if (animator == null)
+        {
+            return;
+        }
+
+        if (!sitLooked)
+        {
+            sitLooked = true;
+            foreach (var clip in Resources.FindObjectsOfTypeAll<AnimationClip>())
+            {
+                string name = clip.name.ToLowerInvariant();
+                if (name.Contains("sit") && !name.Contains("stand") && !clip.legacy && (sitClip == null || (name.Contains("mita") && !sitClip.name.ToLowerInvariant().Contains("mita"))))
+                {
+                    sitClip = clip;
+                }
+            }
+
+            Plugin.Say($"ride: sitting animation {(sitClip != null ? sitClip.name : "none found")}");
+        }
+
+        if (sitClip == null)
+        {
+            return;
+        }
+
+        try
+        {
+            // A state of her own animator by that name if she has one (her animator then keeps it),
+            // otherwise the clip played over her animator.
+            if (animator.HasState(0, Animator.StringToHash(sitClip.name)))
+            {
+                animator.CrossFadeInFixedTime(sitClip.name, 0.2f, 0);
+                rider.sitting = true;
+                Plugin.Say($"ride: sitting through her own animator ({sitClip.name})");
+                return;
+            }
+
+            UnityEngine.Playables.AnimationPlayableUtilities.PlayClip(animator, sitClip, out rider.graph);
+            rider.sitting = true;
+            Plugin.Say($"ride: sitting played over her animator ({animator.gameObject.name}, enabled {animator.enabled})");
+        }
+        catch (Exception e)
+        {
+            Plugin.Say($"ride: sitting failed ({e.Message})");
+        }
+    }
+
+    // Off the chicken (Minecraft stopped saying where it is): she stands and walks again.
+    private static void Dismount(float now)
+    {
+        foreach (var id in new List<uint>(riders.Keys))
+        {
+            var rider = riders[id];
+            if (now - rider.at < 0.5f && rider.who.root != null)
+            {
+                continue;
+            }
+
+            if (rider.sitting && rider.graph.IsValid())
+            {
+                rider.graph.Destroy();
+            }
+
+            var agent = rider.who.mita != null ? rider.who.mita.nma : null;
+            if (agent != null && rider.who.root != null)
+            {
+                agent.enabled = rider.agentWas;
+            }
+
+            riders.Remove(id);
+            Plugin.Say($"ride: {rider.who.name} got off");
+        }
     }
 
     // A character further from the lead's other end than the lead is long is pulled back to it,
@@ -243,14 +380,50 @@ internal static class Actors
     private static Vector3 Feet(Character c)
     {
         var bounds = Bounds(c);
+        // Her walking agent carries her model; what was drawn of her lags behind for a copy that
+        // wasn't drawn yet (it stood where the one copied stood).
+        var agent = c.mita != null ? c.mita.nma : null;
+        if (agent != null && agent.transform != c.root)
+        {
+            var at = agent.transform.position;
+            float y = bounds.size != Vector3.zero && Mathf.Abs(bounds.min.y - at.y) < 1.5f ? bounds.min.y : at.y;
+            return new Vector3(at.x, y, at.z);
+        }
+
         return bounds.size == Vector3.zero ? c.root.position : new Vector3(bounds.center.x, bounds.min.y, bounds.center.z);
     }
 
-    private static Bounds Bounds(Character c)
+    private static Bounds Bounds(Character c) => BoundsOf(c.root);
+
+    // A Mita's model is carried by her walking agent, a part of her object that her walking moves
+    // away from its middle (meters, and a copy of her has its own). That part goes to the spot;
+    // without one, the whole object.
+    internal static void Place(MitaPerson mita, Transform root, Vector3 at, Quaternion facing)
+    {
+        var agent = mita != null ? mita.nma : null;
+        if (agent == null || agent.transform == root)
+        {
+            root.SetPositionAndRotation(at, facing);
+            return;
+        }
+
+        if (agent.enabled && agent.isOnNavMesh)
+        {
+            agent.Warp(at);
+        }
+        else
+        {
+            agent.transform.position = at;
+        }
+
+        agent.transform.rotation = facing;
+    }
+
+    private static Bounds BoundsOf(Transform root)
     {
         bool any = false;
         var bounds = default(Bounds);
-        foreach (var renderer in c.root.GetComponentsInChildren<SkinnedMeshRenderer>())
+        foreach (var renderer in root.GetComponentsInChildren<SkinnedMeshRenderer>())
         {
             if (!renderer.enabled)
             {
@@ -268,11 +441,47 @@ internal static class Actors
             }
         }
 
-        return any ? bounds : new Bounds(c.root.position, Vector3.zero);
+        return any ? bounds : new Bounds(root.position, Vector3.zero);
     }
 
     // "Mita Chibi(Clone)" -> "Mita Chibi".
     public static int IdOf(MitaPerson mita) => mita.transform.GetInstanceID();
+
+    // Testing: a point on the nearest character's bone named like `part` (or her middle).
+    public static Vector3? TestPoint(Vector3 from, string part)
+    {
+        // The one standing where a summoned one goes: 1.5 m in front of the camera.
+        var front = Camera.main != null ? from + Vector3.ProjectOnPlane(Camera.main.transform.forward, Vector3.up).normalized * 1.5f : from;
+        Character best = null;
+        foreach (var c in found)
+        {
+            if (c.root != null && c.root.gameObject.activeInHierarchy && (best == null || Vector3.Distance(Feet(c), front) < Vector3.Distance(Feet(best), front)))
+            {
+                best = c;
+            }
+        }
+
+        if (best == null)
+        {
+            return null;
+        }
+
+        if (part == "body")
+        {
+            return Bounds(best).center;
+        }
+
+        foreach (var bone in BonesOf(best.root))
+        {
+            if (bone.name.ToLowerInvariant().Contains(part))
+            {
+                Plugin.Say($"test: {part} is {bone.name}");
+                return bone.position;
+            }
+        }
+
+        return Bounds(best).center;
+    }
 
     public static MitaPerson MitaById(uint id) => byId.TryGetValue(id, out var c) ? c.mita : null;
 
@@ -323,6 +532,12 @@ internal static class Actors
             }
             case EvActorPush:
                 c.root.position += new Vector3(ev.a, ev.b, -ev.c);
+                return true;
+            case EvActorAt:
+                // Her stand-in rides something (a chicken: a jockey; a boat, a minecart; wings: under
+                // an allay): she is carried along where it is (a, b, c: its feet; d: its yaw), sitting
+                // with ActorAtSits.
+                Ride(c, Units.FromMc(ev.a, ev.b, ev.c), Units.YawFromMc(ev.d), (ev.flags & ActorAtSits) != 0);
                 return true;
             case EvLeash:
                 // On a lead (every tick while she is): the other end is at a, b, c.
@@ -436,6 +651,9 @@ internal static class Actors
             }
         }
 
+        // Bones of her hair and clothes swing by MagicaCloth: a blow on them shows nothing.
+        var clothRoots = Hits.ClothRoots();
+        bones.RemoveWhere(bone => clothRoots.Exists(root => bone.IsChildOf(root)));
         return bones;
     }
 
@@ -957,7 +1175,14 @@ internal static class Actors
 
         var forward = camera.forward;
         forward.y = 0f;
-        var spot = camera.position + forward.normalized * 1.5f;
+        // In front of the player, but this side of a wall (beyond it is another room).
+        float distance = 1.5f;
+        if (Physics.SphereCast(camera.position, 0.25f, forward.normalized, out var wall, distance, ~0, QueryTriggerInteraction.Ignore))
+        {
+            distance = Mathf.Max(0f, wall.distance - 0.1f);
+        }
+
+        var spot = camera.position + forward.normalized * distance;
         if (Physics.Raycast(spot + Vector3.up, Vector3.down, out var ground, 4f, ~0, QueryTriggerInteraction.Ignore))
         {
             spot = ground.point;
@@ -972,7 +1197,6 @@ internal static class Actors
         {
             who = UnityEngine.Object.Instantiate(match.gameObject, spot, facing).GetComponent<MitaPerson>();
         }
-
         who.gameObject.SetActive(true);
         try
         {
@@ -984,6 +1208,8 @@ internal static class Actors
         }
 
         who.transform.SetPositionAndRotation(spot, facing);
+        Place(who, who.transform, spot, facing);
+
         UnityEngine.Object.Destroy(target.gameObject, 1f);
         lastSearch = -10f;
         Plugin.Say($"command: {(ev.flags == 1 ? "summoned another" : "brought")} {match.gameObject.name} to {spot}");

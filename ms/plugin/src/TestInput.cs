@@ -77,6 +77,33 @@ internal static class TestInput
             case "wait" when parts.Length >= 2:
                 busyUntil = now + int.Parse(parts[1]) / 1000f;
                 break;
+            case "aim" when parts.Length >= 3:
+            {
+                var camera = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+                var point = Actors.TestPoint(camera, parts[2].ToLowerInvariant());
+                if (point.HasValue)
+                {
+                    Craft.Instance?.AimAt(point.Value);
+                }
+
+                break;
+            }
+            case "aimat" when parts.Length >= 2:
+            {
+                string name = string.Join(" ", parts, 1, parts.Length - 1).ToLowerInvariant();
+                foreach (var collider in Object.FindObjectsOfType<Collider>())
+                {
+                    if (collider.enabled && collider.gameObject.name.ToLowerInvariant().Contains(name))
+                    {
+                        var b = collider.bounds;
+                        Craft.Instance?.AimAt(new Vector3(b.center.x, b.max.y - 0.05f, b.center.z));
+                        Plugin.Say($"test: aiming at {collider.gameObject.name}");
+                        break;
+                    }
+                }
+
+                break;
+            }
             case "f6":
                 TakeF6 = true;
                 break;

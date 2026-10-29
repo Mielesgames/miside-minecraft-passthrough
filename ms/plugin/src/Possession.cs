@@ -28,6 +28,9 @@ internal static class Possession
 
     internal static bool IsPlayed(MitaPerson who) => mita != null && who == mita;
 
+    // A part of the one the player is.
+    internal static bool Owns(Transform part) => mita != null && part != null && part.IsChildOf(mita.transform);
+
     // A scene of the game's (a cutscene, a conversation, an animation of the player's): she is the
     // game's for that time, the camera too; the player has her back afterwards.
     public static bool Cutscene;
@@ -71,6 +74,11 @@ internal static class Possession
         return timelinePlaying;
     }
     private static bool wasPaused;
+    private static bool agentWasEnabled;
+    private static float lastDebug;
+    private static float lastBlockLog;
+    private static float lastMagnetOff;
+    private static Vector3 walkDirection;
 
     public static bool Handle(in Native.McEvent ev)
     {
@@ -89,7 +97,14 @@ internal static class Possession
             var who = Actors.MitaById(ev.formId);
             if (who != null)
             {
-                Begin(who);
+                try
+                {
+                    Begin(who);
+                }
+                catch (Exception e)
+                {
+                    Plugin.Say($"possession: taking her over failed ({e.Message})");
+                }
             }
         }
 
@@ -122,6 +137,8 @@ internal static class Possession
             }
         }
 
+        HookMirrors();
+
         try
         {
             who.AiShraplyStop();
@@ -130,7 +147,61 @@ internal static class Possession
         {
         }
 
+        // Walking goes through her navigation agent (around walls); a copy of her has it off.
+        agentWasEnabled = who.nma != null && who.nma.enabled;
+        if (who.nma != null && !who.nma.enabled)
+        {
+            who.nma.enabled = true;
+        }
+
         target = new GameObject("MiSideCraft walk target").transform;
+
+        // What her animator listens to (its parameters), for walking her with her own animation.
+        var animator = who.animMita;
+        if (animator != null)
+        {
+            var names = new System.Text.StringBuilder();
+            try
+            {
+                for (int i = 0; i < animator.parameterCount; i++)
+                {
+                    var parameter = animator.GetParameter(i);
+                    names.Append($" {parameter.name} ({parameter.type})");
+                }
+            }
+            catch (Exception e)
+            {
+                names.Append($" (not readable: {e.GetType().Name})");
+            }
+
+            Plugin.Say($"possession: her animator {animator.runtimeAnimatorController?.name}, root motion {animator.applyRootMotion}, parameters:{names}");
+
+            // Her animations by name (what can be played for walking or sitting).
+            var clips = new System.Text.StringBuilder();
+            try
+            {
+                var controller = animator.runtimeAnimatorController;
+                if (controller != null)
+                {
+                    var all = controller.animationClips;
+                    for (int i = 0; i < all.Length; i++)
+                    {
+                        clips.Append($" {all[i].name};");
+                    }
+                }
+
+                for (int layer = 0; layer < animator.layerCount; layer++)
+                {
+                    clips.Append($" [layer {layer} {animator.GetLayerName(layer)}: state {animator.GetCurrentAnimatorStateInfo(layer).shortNameHash}]");
+                }
+            }
+            catch (Exception e)
+            {
+                clips.Append($" (not readable: {e.GetType().Name})");
+            }
+
+            Plugin.Say($"possession: her animations:{clips}");
+        }
         Plugin.Say($"possession: the player is {who.gameObject.name} now (head {(head != null ? head.name : "?")}, {lookOff.Count} look parts off)");
     }
 
@@ -158,12 +229,22 @@ internal static class Possession
         }
 
         headShown = false;
+        if (animWalking)
+        {
+            Animate(false);
+        }
+
         try
         {
             mita.AiShraplyStop();
         }
         catch (Exception)
         {
+        }
+
+        if (mita.nma != null && mita.nma.enabled != agentWasEnabled)
+        {
+            mita.nma.enabled = agentWasEnabled;
         }
 
         Plugin.Say($"possession: {mita.gameObject.name} is herself again");
@@ -240,23 +321,159 @@ internal static class Possession
         // and her walking animation goes by the agent's speed.
         var agent = mita.nma;
         float speed = Keys.Down(0x11) ? 3.5f : 1.6f;
+        // MiSide's "magnet" holds a character on a spot every frame: off while she is played.
+        if (Time.realtimeSinceStartup - lastMagnetOff > 1f)
+        {
+            lastMagnetOff = Time.realtimeSinceStartup;
+            try
+            {
+                Ours = true;
+                mita.MagnetOff();
+            }
+            catch (Exception)
+            {
+            }
+            finally
+            {
+                Ours = false;
+            }
+        }
+        if (Time.realtimeSinceStartup - lastDebug > 2f)
+        {
+            lastDebug = Time.realtimeSinceStartup;
+            Plugin.Say($"possession: move {move}, agent {(agent == null ? "none" : $"enabled {agent.isActiveAndEnabled}, on navmesh {agent.isOnNavMesh}")}, " +
+                $"(active {agent?.gameObject.activeInHierarchy}), at {mita.transform.position}, head {(head != null ? head.position.ToString() : "?")}, paused {Paused} (cutscene {Cutscene}, busy {GameBusy})");
+        }
+        // Her own walking reused: the agent kept on, and a goal of hers just ahead in the way the keys
+        // say, renewed as she goes (her walking animation and path finding come with it). The game's
+        // own goals are kept off meanwhile (PlayedMitaPatch).
+        if (agent != null && !agent.enabled)
+        {
+            agent.enabled = true;
+        }
+
         if (agent != null && agent.isActiveAndEnabled && agent.isOnNavMesh)
         {
-            if (agent.hasPath)
+            float now = Time.realtimeSinceStartup;
+            if (move.sqrMagnitude > 0.01f)
             {
-                agent.ResetPath();
+                // A new goal only when the way changes, she is nearly there, or now and then: every
+                // new order restarts her walk, and renewed too often she never gets past its start.
+                var from = head != null ? new Vector3(head.position.x, mita.transform.position.y, head.position.z) : mita.transform.position;
+                bool turned = Vector3.Angle(move, walkDirection) > 25f;
+                bool near = Vector3.Distance(from, target.position) < 1.2f;
+                if (!walking || turned || near || now - lastWalk > 1f)
+                {
+                    lastWalk = now;
+                    walkDirection = move;
+                    target.position = from + move.normalized * 3f;
+                    agent.speed = speed;
+                    try
+                    {
+                        Ours = true;
+                        mita.AiWalkToTarget(target);
+                    }
+                    catch (Exception)
+                    {
+                        agent.SetDestination(target.position);
+                    }
+                    finally
+                    {
+                        Ours = false;
+                    }
+                }
             }
-
-            agent.velocity = move.sqrMagnitude > 0.01f ? move.normalized * speed : Vector3.zero;
+            else if (walking)
+            {
+                try
+                {
+                    Ours = true;
+                    mita.AiShraplyStop();
+                }
+                catch (Exception)
+                {
+                    agent.ResetPath();
+                }
+                finally
+                {
+                    Ours = false;
+                }
+            }
         }
         else if (move.sqrMagnitude > 0.01f)
         {
-            mita.transform.position += move.normalized * speed * Time.deltaTime;
+            // No agent to keep her in the level: a step only where her body fits (no walls).
+            var step = move.normalized * speed * Time.deltaTime;
+            var bottom = mita.transform.position + Vector3.up * 0.35f;
+            var top = mita.transform.position + Vector3.up * 1.4f;
+            bool blocked = false;
+            foreach (var hit in Physics.CapsuleCastAll(bottom, top, 0.25f, step.normalized, step.magnitude + 0.05f, ~0, QueryTriggerInteraction.Ignore))
+            {
+                if (!hit.collider.transform.IsChildOf(mita.transform) && !Actors.IsCharacter(hit.collider.transform) && !hit.collider.transform.IsChildOf(Craft.Instance.PlayerTransform))
+                {
+                    blocked = true;
+                    if (Time.realtimeSinceStartup - lastBlockLog > 1f)
+                    {
+                        lastBlockLog = Time.realtimeSinceStartup;
+                        Plugin.Say($"possession: her way is blocked by {hit.collider.gameObject.name} at {hit.distance:F2} m");
+                    }
+
+                    break;
+                }
+            }
+
+            if (!blocked)
+            {
+                mita.transform.position += step;
+            }
         }
 
-        walking = move.sqrMagnitude > 0.01f;
-        var facing = walking ? Quaternion.LookRotation(move.normalized, Vector3.up) : Quaternion.Euler(0f, lookYaw, 0f);
-        mita.transform.rotation = Quaternion.RotateTowards(mita.transform.rotation, facing, 540f * Time.deltaTime);
+        bool nowWalking = move.sqrMagnitude > 0.01f;
+        Animate(nowWalking);
+        walking = nowWalking;
+        // Standing, she faces where the player looks; walking, her agent turns her. Turned around
+        // where she stands: her model is a part of her object that her walking moves away from its
+        // middle, and turned around that middle she would swing around it (and the camera with her).
+        if (!walking && Feet(out var pivot))
+        {
+            // The part her walking agent is on carries her model (her object's middle stays behind).
+            var body = mita.nma != null ? mita.nma.transform : mita.transform;
+            var turned = Quaternion.RotateTowards(body.rotation, Quaternion.Euler(0f, lookYaw, 0f), 540f * Time.deltaTime);
+            float angle = Mathf.DeltaAngle(body.eulerAngles.y, turned.eulerAngles.y);
+            body.RotateAround(pivot, Vector3.up, angle);
+        }
+    }
+
+    // Her animator's "Walk" while she walks (her AI's goals don't start it for us), and the state
+    // she stood in before when she stops.
+    private static int standingState;
+    private static bool animWalking;
+
+    private static void Animate(bool nowWalking)
+    {
+        var animator = mita.animMita;
+        if (animator == null || nowWalking == animWalking)
+        {
+            return;
+        }
+
+        animWalking = nowWalking;
+        try
+        {
+            if (nowWalking)
+            {
+                standingState = animator.GetCurrentAnimatorStateInfo(0).fullPathHash;
+                animator.CrossFadeInFixedTime("Walk", 0.2f, 0);
+            }
+            else
+            {
+                animator.CrossFadeInFixedTime(standingState, 0.25f, 0);
+            }
+        }
+        catch (Exception e)
+        {
+            Plugin.Say($"possession: her walking animation failed ({e.Message})");
+        }
     }
 
     // Where she stands (the middle under her model): MiSide's own player goes along there unseen,
@@ -314,12 +531,55 @@ internal static class Possession
         }
 
         headShown = shown;
+        SetHead(shown);
+        HookMirrors();
+    }
+
+    private static void SetHead(bool shown)
+    {
         foreach (var renderer in headOff)
         {
             if (renderer != null)
             {
                 renderer.enabled = shown;
             }
+        }
+    }
+
+    // A mirror (a camera of MiSide's rendering into a texture) shows her whole, head and face: it
+    // is turned on just before such a camera picks what it draws, and off again after it.
+    private static bool mirrorsHooked;
+
+    private static void HookMirrors()
+    {
+        if (mirrorsHooked)
+        {
+            return;
+        }
+
+        mirrorsHooked = true;
+        var before = Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Camera.CameraCallback>(new Action<Camera>(BeforeMirror));
+        var after = Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Camera.CameraCallback>(new Action<Camera>(AfterMirror));
+        Camera.onPreCull = Camera.onPreCull == null ? before : (Camera.CameraCallback)Il2CppSystem.Delegate.Combine(Camera.onPreCull, before);
+        Camera.onPostRender = Camera.onPostRender == null ? after : (Camera.CameraCallback)Il2CppSystem.Delegate.Combine(Camera.onPostRender, after);
+    }
+
+    private static bool InMirror(Camera camera) =>
+        mita != null && !headShown && camera != null && camera.targetTexture != null && camera.gameObject.name != "CameraPersons";
+
+    private static void BeforeMirror(Camera camera)
+    {
+        if (InMirror(camera))
+        {
+            SetHead(true);
+        }
+    }
+
+    private static void AfterMirror(Camera camera)
+    {
+        if (InMirror(camera))
+        {
+            SetHead(false);
         }
     }
 }
@@ -330,7 +590,8 @@ internal static class Keys
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int key);
 
-    public static bool Down(int virtualKey) => (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+    // Only while MiSide is the window in front: typing elsewhere doesn't walk her.
+    public static bool Down(int virtualKey) => Application.isFocused && (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
 }
 
 // While the player plays her, the game's own orders to her (walk, come, teleport) are carried out
@@ -386,5 +647,41 @@ internal static class CutsceneStopPatch
     private static void Postfix()
     {
         Possession.Cutscene = false;
+    }
+}
+
+// Her looking at the player (head, eyes, turning her body to him): her own script turns it back on,
+// so its updates are skipped while the player is her (he stands where she does, she'd look at him).
+[HarmonyLib.HarmonyPatch]
+internal static class PlayedLookPatch
+{
+    private static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+    {
+        yield return HarmonyLib.AccessTools.Method(typeof(Character_Look), "Update");
+        yield return HarmonyLib.AccessTools.Method(typeof(Character_Look), "LateUpdate");
+    }
+
+    private static bool Prefix(Character_Look __instance)
+    {
+        return !Possession.Owns(__instance.transform);
+    }
+}
+
+// Her own little doings while she stands (clapping, stretching: "Behaviour 4") and the game's other
+// animations for her: not while the player is her, unless a scene of the game's has her.
+[HarmonyLib.HarmonyPatch]
+internal static class PlayedAnimationPatch
+{
+    private static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+    {
+        foreach (var name in new[] { "AnimationClipSimple", "AnimationClipSimpleNext", "AnimationClipSimpleFrame", "AnimationIdlePlayAfterWalk" })
+        {
+            yield return HarmonyLib.AccessTools.Method(typeof(Animator_FunctionsOverride), name);
+        }
+    }
+
+    private static bool Prefix(Animator_FunctionsOverride __instance)
+    {
+        return Possession.Paused || !Possession.Owns(__instance.transform);
     }
 }

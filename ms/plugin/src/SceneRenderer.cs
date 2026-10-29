@@ -38,6 +38,8 @@ internal static class SceneRenderer
     private static int next;
     private static bool hooked;
     private static float mirrorsFound = -10f;
+    private static int mainId;
+    private static readonly HashSet<int> seen = new();
 
     // The main camera, every frame from the game thread; `avatar`: Steve's body seen (F5).
     public static void Frame(Camera camera, bool avatar)
@@ -54,8 +56,10 @@ internal static class SceneRenderer
         }
 
         var main = Attach(camera, false);
+        mainId = camera.GetInstanceID();
         Record(main, avatar ? 1 : 0);
         FindMirrors(camera);
+        Hook();
     }
 
     private static Attached Attach(Camera camera, bool mirror)
@@ -153,6 +157,34 @@ internal static class SceneRenderer
             Hook();
         }
 
+        // MiSide's mirrors keep their cameras switched off and have them render on demand, so
+        // they aren't among the cameras above: they are found through the mirrors themselves.
+        foreach (var mirror in UnityEngine.Object.FindObjectsOfType<MirrorRef>())
+        {
+            if (mirror.mirrorCamera != null)
+            {
+                Attach(mirror.mirrorCamera, true);
+                Hook();
+            }
+        }
+
+        foreach (var planar in UnityEngine.Object.FindObjectsOfType<PIDI_PlanarReflection>())
+        {
+            if (planar.v_reflectionCameras == null)
+            {
+                continue;
+            }
+
+            foreach (var reflection in planar.v_reflectionCameras)
+            {
+                if (reflection.reflector != null && reflection.reflector != main)
+                {
+                    Attach(reflection.reflector, true);
+                    Hook();
+                }
+            }
+        }
+
         foreach (var key in new List<int>(cameras.Keys))
         {
             if (cameras[key].camera == null)
@@ -177,9 +209,30 @@ internal static class SceneRenderer
     // A mirror's camera about to render, with its matrices just set: its view now, with Steve.
     private static void BeforeRender(Camera camera)
     {
-        if (camera != null && cameras.TryGetValue(camera.GetInstanceID(), out var attached) && attached.mirror)
+        if (camera == null)
         {
-            Record(attached, 2);
+            return;
+        }
+
+        // Every camera that renders is told once (which one is a mirror's), and one rendering into
+        // a texture that isn't the main one or the characters' is taken for a mirror.
+        int id = camera.GetInstanceID();
+        if (seen.Add(id))
+        {
+            var target = camera.targetTexture;
+            Plugin.Say($"camera renders: {camera.gameObject.name} (enabled {camera.enabled}, " +
+                $"{(target != null ? $"into a texture {target.width}x{target.height}" : "to the screen")}, culling mask {camera.cullingMask:X})");
+        }
+
+        if (id != mainId && !cameras.ContainsKey(id) && camera.targetTexture != null && camera.gameObject.name != "CameraPersons" && camera.cameraType == CameraType.Game)
+        {
+            Attach(camera, true);
+        }
+
+        if (cameras.TryGetValue(id, out var attached) && attached.mirror)
+        {
+            // Being Mita, the player is her in the mirror: no Steve (spectating, he is a head).
+            Record(attached, Possession.Active ? 0 : 2);
         }
     }
 

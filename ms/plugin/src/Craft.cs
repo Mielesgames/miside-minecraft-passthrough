@@ -133,8 +133,18 @@ public class Craft : MonoBehaviour
 
         var feetUnity = Feet();
         var feet = Units.ToMc(feetUnity);
-        var look = Look((steve && driving) || possessed);
-        Possession.Update(lookYaw);
+        var look = Look((steve && driving) || possessed, driving || possessed);
+        if (minecraftMode)
+        {
+            Possession.Update(lookYaw);
+        }
+
+        // Standing still a while opens MiSide's console: Minecraft moving the player doesn't count
+        // as moving to the game.
+        if (game != null && minecraftMode && inWorld && (steve || possessed))
+        {
+            game.timeAFK = 0f;
+        }
         FollowPlayed(possessed);
         PushDoors(steve && driving);
 
@@ -497,9 +507,16 @@ public class Craft : MonoBehaviour
     private float lookYaw, lookPitch;
     private double lastLogX, lastLogZ;
 
-    private Vector2 Look(bool steering)
+    // `ours`: the camera is placed by us (Steve's, F5, or hers), so the look stays our own and is
+    // not read back from it: F5's front view looks the other way and would turn it around.
+    private Vector2 Look(bool steering, bool ours)
     {
         Native.msc_take_look(out int dx, out int dy);
+        if (!steering && ours)
+        {
+            return new Vector2(lookPitch, lookYaw);
+        }
+
         if (!steering)
         {
             var angles = LookAngles();
@@ -514,6 +531,21 @@ public class Craft : MonoBehaviour
         lookYaw = Mathf.Repeat(lookYaw + dx * perCount, 360f);
         lookPitch = Mathf.Clamp(lookPitch + dy * perCount, -90f, 90f);
         return new Vector2(lookPitch, lookYaw);
+    }
+
+    // Testing: turn Steve's look onto a point (TestInput "aim").
+    internal void AimAt(Vector3 point)
+    {
+        var camera = CameraTransform();
+        if (camera == null)
+        {
+            return;
+        }
+
+        var to = point - camera.position;
+        lookYaw = Quaternion.LookRotation(to).eulerAngles.y;
+        lookPitch = -Mathf.Asin(Mathf.Clamp(to.normalized.y, -1f, 1f)) * Mathf.Rad2Deg;
+        Plugin.Say($"test: aiming at {point}");
     }
 
     private Vector2 LookAngles()
@@ -681,6 +713,8 @@ public class Craft : MonoBehaviour
 
     internal bool Drives(PlayerMove move) => driving && move == player;
 
+    internal Transform PlayerTransform => player != null ? player.transform : null;
+
     // The player's capsule onto Minecraft's feet. Where he faces stays MiSide's: its mouse look
     // turns him and the camera, and Minecraft follows that look (SkyState yaw and pitch).
     private void PlaceAtMinecraft()
@@ -719,7 +753,7 @@ public class Craft : MonoBehaviour
             return;
         }
 
-        if (Possession.PlaceCamera(camera, lookPitch, lookYaw, haveMc ? mc.cameraMode : 0u))
+        if (minecraftMode && Possession.PlaceCamera(camera, lookPitch, lookYaw, haveMc ? mc.cameraMode : 0u))
         {
         }
         else if (driving)

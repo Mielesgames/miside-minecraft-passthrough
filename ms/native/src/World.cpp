@@ -2680,7 +2680,7 @@ float4 PSLight(float4 pos : SV_Position) : SV_Target {
 
             Constants frame{};
             frame.depth[3] = g_night_vision.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
-            g_draw_avatar = view.draw_avatar != 0 && !depth_only;
+            g_draw_avatar = view.draw_avatar != 0;
 
             const D3D11_VIEWPORT vp{ 0, 0, float(desc.Width), float(desc.Height), 0, 1 };
             const float factor[4]{};

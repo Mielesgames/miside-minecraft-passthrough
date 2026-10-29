@@ -329,7 +329,8 @@ namespace skycraft::proto
 		kEvLeadPost = 9,    // the player used a fence at a, b, c (its middle): leads in hand are tied to it,
 		                    // or, with none in hand, the ones tied there come off
 		kEvActorAt = 8,     // a host character's stand-in sits in a boat or minecart: formId, a/b/c = where (its feet),
-		                    // d = yaw. Sent every tick while it does; the host keeps the character there.
+		                    // d = yaw. Sent every tick while it does; the host keeps the character there. Also a jockey's
+		                    // chicken and a winged one's allay. flags kActorAtSits: it sits there (not on an allay).
 		kEvRedstone = 7,    // a redstone source near the player switched: a/b/c = its block, flags = 1 on / 0 off.
 		                    // MiSide's doors within a few blocks of one open.
 		kEvPossess = 19,    // spectator mode looks through a host character's stand-in: formId = that character (0: no
@@ -339,6 +340,8 @@ namespace skycraft::proto
 		kEvCommand = 6,     // a chat command about one of the host game's characters: formId = HostCharacter,
 		                    // flags = 0: bring it to the player, 1: spawn a new one
 	};
+
+	inline constexpr std::uint32_t kActorAtSits = 8;  // kEvActorAt flags: the character sits where it is carried
 
 	// The /miside options (kEvSetting).
 	enum SettingOption : std::uint32_t

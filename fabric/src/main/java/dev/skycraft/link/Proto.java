@@ -100,6 +100,8 @@ public final class Proto {
 	public static final int EV_COMMAND = 6;
 	public static final int EV_REDSTONE = 7;
 	public static final int EV_ACTOR_AT = 8;
+	/** EV_ACTOR_AT flag: the character sits (on a chicken, in a boat). */
+	public static final int ACTOR_AT_SITS = 8;
 	public static final int EV_LEAD_POST = 9;
 	public static final int EV_ACTOR_PUSH = 10;
 	public static final int EV_ACTOR_WINGS = 11;

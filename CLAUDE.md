@@ -54,7 +54,7 @@ Emiel (GitHub Mielesgames). Nederlands of Engels, korte uitleg zonder jargon. **
 - BepInEx 6 BE build 791 staat in het spel (`BepInEx\LogOutput.log`). Gedecompileerde interop-code: `C:\Users\emiel\MiSideCraft-dev\decomp` (ilspycmd 8.2; alleen signaturen).
 - Voor het testen staat er een `steam_appid.txt` in de spelmap: het exe start dan direct, zonder Steams "already running" zolang Minecraft nog draait. Mag weg.
 - Speler: `PlayerMove` (Rigidbody `rb`, `capsule`, `mainCamera`, `castMove`, `dontMove`, `animationRun`, `cameraOtherTarget`, `TeleportPlayer*`).
-- `GameController`: `scrpm`, `cameraPlayer`, `isPaused`, `Pause`, `FastMenuOpen`. Het menu: `Menu.ButtonContinue()`.
+- `GameController`: `scrpm`, `cameraPlayer`, `isPaused`, `Pause`, `FastMenuOpen`, `timeAFK` (te lang stil = de gameboy gaat open; de plugin houdt hem op 0 in Minecraft-modus). Het menu: `Menu.ButtonContinue()`.
 
 ## Bouwen en installeren
 - Native: `"C:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" --build ms/native/build --config Release`
@@ -89,6 +89,40 @@ Emiel (GitHub Mielesgames). Nederlands of Engels, korte uitleg zonder jargon. **
   - loot-kisten (`kInLootChest`);
   - MiSide's achievements (`GameAchievements` wacht op de host);
   - deuren meteen opnieuw scannen.
+
+## Stand (29 okt, eind van de dag) – gepauzeerd, de laatste build staat geïnstalleerd
+- Sinds 28 okt gebouwd: F5, lead/emmer/schaar/pompoen, `/miside`-opties, sweep-snijden, zitten, `/tick` en Mita overnemen (`Possession.cs`). Mita overnemen werkt in spectator mode.
+- **Mita's model wordt gedragen door haar NavMeshAgent, en die zit op een kind-object.** Dat kind staat soms tientallen meters van haar `MitaPerson`-object af. Een kopie (`/summon`) heeft ook een eigen afstand.
+  - Daarom verplaatst `Actors.Place` het agent-deel (`Warp`, of de positie als hij uit staat), bij `/mita`, `/summon` en op de kip.
+  - `Feet()` voor de actortabel komt van de agent.
+  - Bij het overnemen draait het agent-deel om haar voeten.
+- **Getest en werkt:**
+  - de loopanimatie bij het overnemen;
+  - Steve in de spiegel: de camera heet "Pooled Reflector 0" en wordt gevonden via `Camera.onPreRender` (elke camera die in een textuur rendert);
+  - de gameboy (`timeAFK`).
+- **In de laatste build, nog niet getest:**
+  - de jockey staat op de goede plek, zit (`Mita Sit Idle` via haar eigen animator), en wie je bestuurt rijdt niet mee;
+  - Java: entities onder y −32 worden weggehaald (`SkyCombat.dropOutOfBounds`);
+  - zitten op de bank: de armor stand gaat omlaag (`HidingSeat`); eerst zat je bovenop de armor stand, op het dak;
+  - deuren en "Bedroom" tellen niet meer als zitplaats;
+  - Mita besturen alleen als het spelvenster focus heeft (`Application.isFocused`);
+  - `Character_Look` overgeslagen bij het overnemen, zodat ze niet meer naar de speler kijkt;
+  - haar eigen idle-gedrag ("Behaviour 4", klappen) geblokkeerd via `Animator_FunctionsOverride`, behalve in scènes;
+  - geen Steve of spectatorhoofd in de spiegel tijdens het overnemen;
+  - Mita's hoofd in de spiegel tijdens het overnemen;
+  - `/mita` vóór de muur.
+- **Open:**
+  - **F5 twee keer (vooraanzicht):** Emiel vindt de besturing omgedraaid. Hij heeft nog niet gezegd of het bij Steve of bij Mita was. Het werkt nu zoals in Minecraft zelf (W loopt naar de camera).
+  - Overnemen terwijl Mita zit: ze doet vreemd. Idee: eerst laten opstaan.
+  - Af en toe zakt Steve door de keukenvloer (vangnet −3,1 m) als hij een nieuwe regio in rent. In één run ook "drift" naar y −3,9 vlak na de start.
+  - Door deuren lopen terwijl je Mita bestuurt: niet getest.
+  - **Jockey (Emiel, 29 okt, laatste test):**
+    - Mita volgt de kip nu goed.
+    - De kip valt door de vloer: de kip heeft in Minecraft geen collision met MiSide's vloer. Er staat geen "waits for floor" en geen "fell out" in de Minecraft-log.
+    - Er is geen zit-animatie te zien. Volgens de log is `CrossFadeInFixedTime("Mita Sit Idle")` wel gestart via haar eigen animator, maar haar script zet haar animator waarschijnlijk meteen terug.
+      - Ideeën: de zit-clip elke tik opnieuw zetten;
+      - of via `Animator_FunctionsOverride.AnimationClipSimple` (het spel z'n eigen manier);
+      - of een PlayableGraph die `animMita` overneemt.
 
 ## Wensen (nog niet gebouwd)
 - **Mita overnemen, zoals spectator mobs overneemt** (wens 28 okt). In spectator mode op Mita klikken = je bent Mita.
